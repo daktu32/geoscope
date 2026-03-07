@@ -99,6 +99,7 @@ pub struct MapRenderer {
     pub zoom: f32,
     data_min: f32,
     data_max: f32,
+    interpolated: bool,
     initialized: bool,
 }
 
@@ -110,6 +111,7 @@ impl MapRenderer {
             zoom: 1.0,
             data_min: 0.0,
             data_max: 1.0,
+            interpolated: true,
             initialized: false,
         }
     }
@@ -144,7 +146,7 @@ impl MapRenderer {
             view_proj: identity_mat4(),
             view: identity_mat4(),
             data_range: [0.0, 1.0],
-            _padding: [0.0; 2],
+            params: [0.0; 2],
         };
 
         let camera_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -380,6 +382,7 @@ impl MapRenderer {
         width: usize,
         height: usize,
         colormap: crate::ui::Colormap,
+        interpolated: bool,
     ) {
         let device = &render_state.device;
         let queue = &render_state.queue;
@@ -397,6 +400,7 @@ impl MapRenderer {
         }
         self.data_min = min;
         self.data_max = max;
+        self.interpolated = interpolated;
 
         let new_texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Map Data Texture"),
@@ -589,7 +593,7 @@ impl MapRenderer {
             view_proj,
             view: identity_mat4(),
             data_range: [self.data_min, self.data_max],
-            _padding: [0.0; 2],
+            params: [if self.interpolated { 1.0 } else { 0.0 }, 0.0],
         };
 
         let callback = egui_wgpu::Callback::new_paint_callback(
@@ -678,7 +682,7 @@ struct CameraUniform {
     view_proj: mat4x4<f32>,
     view: mat4x4<f32>,
     data_range: vec2<f32>,
-    _padding: vec2<f32>,
+    params: vec2<f32>, // x: interpolated (0=grid, 1=smooth), y: unused
 };
 
 @group(0) @binding(0) var<uniform> camera: CameraUniform;
@@ -706,9 +710,35 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     return out;
 }
 
+fn sample_bilinear(uv: vec2<f32>) -> f32 {
+    let dims = vec2<f32>(textureDimensions(data_tex));
+    let texel = uv * dims - 0.5;
+    let ix = floor(texel.x);
+    let iy = floor(texel.y);
+    let fx = texel.x - ix;
+    let fy = texel.y - iy;
+
+    let x0 = i32(ix) % i32(dims.x);
+    let x1 = (x0 + 1) % i32(dims.x);
+    let y0 = clamp(i32(iy), 0, i32(dims.y) - 1);
+    let y1 = clamp(y0 + 1, 0, i32(dims.y) - 1);
+
+    let v00 = textureLoad(data_tex, vec2<i32>(x0, y0), 0).r;
+    let v10 = textureLoad(data_tex, vec2<i32>(x1, y0), 0).r;
+    let v01 = textureLoad(data_tex, vec2<i32>(x0, y1), 0).r;
+    let v11 = textureLoad(data_tex, vec2<i32>(x1, y1), 0).r;
+
+    return mix(mix(v00, v10, fx), mix(v01, v11, fx), fy);
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let data_val = textureSample(data_tex, data_sampler, in.uv).r;
+    var data_val: f32;
+    if camera.params.x > 0.5 {
+        data_val = sample_bilinear(in.uv);
+    } else {
+        data_val = textureSample(data_tex, data_sampler, in.uv).r;
+    }
 
     let range = camera.data_range;
     let normalized = clamp((data_val - range.x) / max(range.y - range.x, 0.0001), 0.0, 1.0);
@@ -722,10 +752,10 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let lat_deg = in.uv.y * 180.0;
     let grid_lon = abs(lon_deg % 30.0);
     let grid_lat = abs(lat_deg % 30.0);
-    let line_width = 0.6;
+    let line_width = 0.25;
     if grid_lon < line_width || grid_lon > (30.0 - line_width) ||
        grid_lat < line_width || grid_lat > (30.0 - line_width) {
-        color = mix(color, vec3<f32>(0.3, 0.3, 0.3), 0.6);
+        color = mix(color, vec3<f32>(0.4, 0.4, 0.4), 0.35);
     }
 
     return vec4<f32>(color, 1.0);

@@ -34,25 +34,6 @@ impl Colormap {
 
     pub const ALL: [Colormap; 2] = [Colormap::Viridis, Colormap::RdBuR];
 
-    /// Returns gradient colors for preview (5 stops).
-    pub fn gradient_colors(&self) -> [egui::Color32; 5] {
-        match self {
-            Self::Viridis => [
-                egui::Color32::from_rgb(68, 1, 84),
-                egui::Color32::from_rgb(59, 82, 139),
-                egui::Color32::from_rgb(33, 145, 140),
-                egui::Color32::from_rgb(94, 201, 98),
-                egui::Color32::from_rgb(253, 231, 37),
-            ],
-            Self::RdBuR => [
-                egui::Color32::from_rgb(5, 48, 97),
-                egui::Color32::from_rgb(103, 169, 207),
-                egui::Color32::from_rgb(247, 247, 247),
-                egui::Color32::from_rgb(214, 96, 77),
-                egui::Color32::from_rgb(103, 0, 31),
-            ],
-        }
-    }
 }
 
 /// Persistent UI state (stored in GeoScopeApp).
@@ -65,6 +46,8 @@ pub struct UiState {
     pub playing: bool,
     pub play_speed: f32,
     play_accumulator: f64,
+    /// When true, use bilinear interpolation for field data; otherwise nearest-neighbor (grid-point).
+    pub interpolated: bool,
 }
 
 impl Default for UiState {
@@ -77,6 +60,7 @@ impl Default for UiState {
             playing: false,
             play_speed: 10.0,
             play_accumulator: 0.0,
+            interpolated: true,
         }
     }
 }
@@ -221,118 +205,128 @@ impl GeoScopeTabViewer<'_> {
     }
 
     fn viewport_ui(&mut self, ui: &mut egui::Ui) {
-        // Render based on current view mode
-        match self.ui_state.view_mode {
-            ViewMode::Globe => self.globe_renderer.paint(ui),
-            ViewMode::Map => self.map_renderer.paint(ui),
-            ViewMode::Hovmoller => self.hovmoller_renderer.paint(ui),
-            ViewMode::Spectrum => self.spectrum_renderer.paint(ui),
-        }
-
-        // Time slider at the bottom of viewport
+        // Auto-play logic (runs before layout)
         if let Some(time_len) = self.active_time_dim_len() {
-            if time_len > 1 {
-                // Auto-play: advance time based on elapsed time
-                if self.ui_state.playing {
-                    let dt = ui.input(|i| i.stable_dt) as f64;
-                    self.ui_state.play_accumulator += dt * self.ui_state.play_speed as f64;
-                    let steps = self.ui_state.play_accumulator as usize;
-                    if steps > 0 {
-                        self.ui_state.play_accumulator -= steps as f64;
-                        let new_t = (self.ui_state.time_index + steps) % time_len;
-                        if new_t != self.ui_state.time_index {
-                            self.ui_state.time_index = new_t;
-                            if let Some(fi) = self.data_store.active_file {
-                                if let Some(file) = self.data_store.files.get(fi) {
-                                    if let Some(vi) = file.selected_variable {
-                                        if self.data_store.load_field_at(fi, vi, new_t, 0).is_ok() {
-                                            *self.data_generation += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    ui.ctx().request_repaint();
-                }
-
-                ui.add_space(2.0);
-                ui.horizontal(|ui| {
-                    // Play/Pause button
-                    let icon = if self.ui_state.playing { "⏸" } else { "▶" };
-                    if ui.button(egui::RichText::new(icon).size(12.0)).clicked() {
-                        self.ui_state.playing = !self.ui_state.playing;
-                        self.ui_state.play_accumulator = 0.0;
-                    }
-
-                    ui.label(
-                        egui::RichText::new(format!("t={}", self.ui_state.time_index))
-                            .monospace()
-                            .size(11.0),
-                    );
-
-                    let mut t = self.ui_state.time_index;
-                    if t >= time_len {
-                        t = 0;
-                        self.ui_state.time_index = 0;
-                    }
-                    let max = time_len - 1;
-                    let slider = egui::Slider::new(&mut t, 0..=max)
-                        .show_value(false);
-                    if ui.add(slider).changed() {
-                        self.ui_state.time_index = t;
-                        self.ui_state.playing = false;
+            if time_len > 1 && self.ui_state.playing {
+                let dt = ui.input(|i| i.stable_dt) as f64;
+                self.ui_state.play_accumulator += dt * self.ui_state.play_speed as f64;
+                let steps = self.ui_state.play_accumulator as usize;
+                if steps > 0 {
+                    self.ui_state.play_accumulator -= steps as f64;
+                    let new_t = (self.ui_state.time_index + steps) % time_len;
+                    if new_t != self.ui_state.time_index {
+                        self.ui_state.time_index = new_t;
                         if let Some(fi) = self.data_store.active_file {
                             if let Some(file) = self.data_store.files.get(fi) {
                                 if let Some(vi) = file.selected_variable {
-                                    if self.data_store.load_field_at(fi, vi, t, 0).is_ok() {
+                                    if self.data_store.load_field_at(fi, vi, new_t, 0).is_ok() {
                                         *self.data_generation += 1;
                                     }
                                 }
                             }
                         }
                     }
-
-                    // Speed control
-                    ui.separator();
-                    ui.label(egui::RichText::new("×").size(11.0).color(egui::Color32::from_gray(128)));
-                    let mut speed = self.ui_state.play_speed;
-                    let speed_slider = egui::Slider::new(&mut speed, 1.0..=60.0)
-                        .logarithmic(true)
-                        .show_value(true)
-                        .suffix(" fps")
-                        .custom_formatter(|v, _| format!("{:.0}", v));
-                    if ui.add_sized([120.0, 18.0], speed_slider).changed() {
-                        self.ui_state.play_speed = speed;
-                    }
-                });
+                }
+                ui.ctx().request_repaint();
             }
         }
 
-        // View mode tab bar at the bottom
-        ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            let primary = egui::Color32::from_rgb(0, 164, 154);
-            for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum] {
-                let label = match mode {
-                    ViewMode::Globe => "Globe",
-                    ViewMode::Map => "Map",
-                    ViewMode::Hovmoller => "Hovmoller",
-                    ViewMode::Spectrum => "E(n)",
-                };
-                let is_active = self.ui_state.view_mode == mode;
-                let text = if is_active {
-                    egui::RichText::new(label).color(primary).strong().size(12.0)
-                } else {
-                    egui::RichText::new(label)
-                        .color(egui::Color32::from_gray(160))
-                        .size(12.0)
-                };
-                if ui.selectable_label(is_active, text).clicked() {
-                    self.ui_state.view_mode = mode;
-                }
+        // Bottom controls first (so the view gets remaining space)
+        // View mode tab bar
+        egui::TopBottomPanel::bottom("viewport_tabs")
+            .frame(egui::Frame::NONE)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let primary = egui::Color32::from_rgb(0, 164, 154);
+                    for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum] {
+                        let label = match mode {
+                            ViewMode::Globe => "Globe",
+                            ViewMode::Map => "Map",
+                            ViewMode::Hovmoller => "Hovmoller",
+                            ViewMode::Spectrum => "E(n)",
+                        };
+                        let is_active = self.ui_state.view_mode == mode;
+                        let text = if is_active {
+                            egui::RichText::new(label).color(primary).strong().size(12.0)
+                        } else {
+                            egui::RichText::new(label)
+                                .color(egui::Color32::from_gray(160))
+                                .size(12.0)
+                        };
+                        if ui.selectable_label(is_active, text).clicked() {
+                            self.ui_state.view_mode = mode;
+                        }
+                    }
+                });
+            });
+
+        // Time slider (above tab bar)
+        if let Some(time_len) = self.active_time_dim_len() {
+            if time_len > 1 {
+                egui::TopBottomPanel::bottom("viewport_time")
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let icon = if self.ui_state.playing { "⏸" } else { "▶" };
+                            if ui.button(egui::RichText::new(icon).size(12.0)).clicked() {
+                                self.ui_state.playing = !self.ui_state.playing;
+                                self.ui_state.play_accumulator = 0.0;
+                            }
+
+                            ui.label(
+                                egui::RichText::new(format!("t={}", self.ui_state.time_index))
+                                    .monospace()
+                                    .size(11.0),
+                            );
+
+                            let mut t = self.ui_state.time_index;
+                            if t >= time_len {
+                                t = 0;
+                                self.ui_state.time_index = 0;
+                            }
+                            let max = time_len - 1;
+                            let slider = egui::Slider::new(&mut t, 0..=max)
+                                .show_value(false);
+                            if ui.add(slider).changed() {
+                                self.ui_state.time_index = t;
+                                self.ui_state.playing = false;
+                                if let Some(fi) = self.data_store.active_file {
+                                    if let Some(file) = self.data_store.files.get(fi) {
+                                        if let Some(vi) = file.selected_variable {
+                                            if self.data_store.load_field_at(fi, vi, t, 0).is_ok() {
+                                                *self.data_generation += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            ui.separator();
+                            ui.label(egui::RichText::new("×").size(11.0).color(egui::Color32::from_gray(128)));
+                            let mut speed = self.ui_state.play_speed;
+                            let speed_slider = egui::Slider::new(&mut speed, 1.0..=60.0)
+                                .logarithmic(true)
+                                .show_value(true)
+                                .suffix(" fps")
+                                .custom_formatter(|v, _| format!("{:.0}", v));
+                            if ui.add_sized([120.0, 18.0], speed_slider).changed() {
+                                self.ui_state.play_speed = speed;
+                            }
+                        });
+                    });
             }
-        });
+        }
+
+        // Central area: the actual view (gets all remaining space)
+        let central = ui.available_rect_before_wrap();
+        let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(central));
+        match self.ui_state.view_mode {
+            ViewMode::Globe => self.globe_renderer.paint(&mut child_ui),
+            ViewMode::Map => self.map_renderer.paint(&mut child_ui),
+            ViewMode::Hovmoller => self.hovmoller_renderer.paint(&mut child_ui),
+            ViewMode::Spectrum => self.spectrum_renderer.paint(&mut child_ui),
+        }
+        ui.allocate_rect(central, egui::Sense::hover());
     }
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
@@ -376,24 +370,49 @@ impl GeoScopeTabViewer<'_> {
                             }
                         });
 
-                    // Colormap gradient preview
+                    // Colormap gradient preview (smooth, LUT-based)
                     ui.add_space(4.0);
                     let available_width = ui.available_width() - 8.0;
+                    let bar_height = 14.0;
                     let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(available_width, 12.0), egui::Sense::hover());
-                    let colors = self.ui_state.colormap.gradient_colors();
-                    let n = colors.len();
+                        ui.allocate_exact_size(egui::vec2(available_width, bar_height), egui::Sense::hover());
+                    let lut = crate::renderer::common::colormap_lut(self.ui_state.colormap);
                     let painter = ui.painter();
-                    for i in 0..(n - 1) {
-                        let t0 = i as f32 / (n - 1) as f32;
-                        let t1 = (i + 1) as f32 / (n - 1) as f32;
-                        let x0 = rect.left() + t0 * rect.width();
-                        let x1 = rect.left() + t1 * rect.width();
-                        let mesh_rect =
-                            egui::Rect::from_min_max(egui::pos2(x0, rect.top()), egui::pos2(x1, rect.bottom()));
-                        painter.rect_filled(mesh_rect, 0.0, colors[i]);
-                        // Simple two-color fill per segment; gradient effect from multiple segments
+                    // Use an egui Mesh for smooth per-vertex color interpolation
+                    let mut mesh = egui::Mesh::default();
+                    let n_stops = 64;
+                    for i in 0..=n_stops {
+                        let t = i as f32 / n_stops as f32;
+                        let idx = (t * 255.0) as usize;
+                        let base = idx * 4;
+                        let color = egui::Color32::from_rgb(lut[base], lut[base + 1], lut[base + 2]);
+                        let x = rect.left() + t * rect.width();
+                        mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+                        mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
                     }
+                    for i in 0..n_stops {
+                        let tl = (i * 2) as u32;
+                        let bl = tl + 1;
+                        let tr = tl + 2;
+                        let br = tl + 3;
+                        mesh.add_triangle(tl, bl, tr);
+                        mesh.add_triangle(bl, br, tr);
+                    }
+                    painter.add(egui::Shape::mesh(mesh));
+
+                    // Interpolation mode toggle
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Display:").size(11.0).color(egui::Color32::from_gray(160)));
+                        if ui.selectable_label(!self.ui_state.interpolated, egui::RichText::new("Grid").size(11.0)).clicked() {
+                            self.ui_state.interpolated = false;
+                            *self.data_generation += 1;
+                        }
+                        if ui.selectable_label(self.ui_state.interpolated, egui::RichText::new("Smooth").size(11.0)).clicked() {
+                            self.ui_state.interpolated = true;
+                            *self.data_generation += 1;
+                        }
+                    });
 
                     ui.add_space(8.0);
                     ui.separator();

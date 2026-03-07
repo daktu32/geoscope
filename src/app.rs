@@ -40,7 +40,7 @@ impl GeoScopeApp {
         let mut dock_state = DockState::new(vec![Tab::Viewport]);
         let surface = dock_state.main_surface_mut();
         surface.split_left(NodeIndex::root(), 0.15, vec![Tab::DataBrowser]);
-        surface.split_right(NodeIndex::root(), 0.20, vec![Tab::Inspector]);
+        surface.split_right(NodeIndex::root(), 0.80, vec![Tab::Inspector]);
 
         Self {
             dock_state,
@@ -295,6 +295,7 @@ impl eframe::App for GeoScopeApp {
                         field.width,
                         field.height,
                         self.ui_state.colormap,
+                        self.ui_state.interpolated,
                     );
                     self.map_renderer.ensure_initialized(render_state);
                     self.map_renderer.upload_field_data(
@@ -303,6 +304,7 @@ impl eframe::App for GeoScopeApp {
                         field.width,
                         field.height,
                         self.ui_state.colormap,
+                        self.ui_state.interpolated,
                     );
                     self.gpu_generation = self.data_generation;
 

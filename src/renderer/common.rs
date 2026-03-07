@@ -23,7 +23,9 @@ pub struct CameraUniform {
     pub view_proj: [[f32; 4]; 4],
     pub view: [[f32; 4]; 4],
     pub data_range: [f32; 2], // [min, max]
-    pub _padding: [f32; 2],
+    /// [0]: interpolated flag (0.0 = nearest/grid, 1.0 = bilinear/smooth)
+    /// [1]: unused
+    pub params: [f32; 2],
 }
 
 // ---------------------------------------------------------------------------
