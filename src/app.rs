@@ -3,6 +3,9 @@ use egui_dock::{DockArea, DockState, NodeIndex};
 
 use crate::data::DataStore;
 use crate::renderer::GlobeRenderer;
+use crate::renderer::MapRenderer;
+use crate::renderer::hovmoller::HovmollerRenderer;
+use crate::renderer::spectrum::SpectrumRenderer;
 use crate::ui::{GeoScopeTabViewer, Tab};
 
 const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0, 164, 154);
@@ -17,6 +20,9 @@ pub struct GeoScopeApp {
     dock_state: DockState<Tab>,
     data_store: DataStore,
     globe_renderer: GlobeRenderer,
+    map_renderer: MapRenderer,
+    hovmoller_renderer: HovmollerRenderer,
+    spectrum_renderer: SpectrumRenderer,
     ui_state: crate::ui::UiState,
     data_generation: u64,
     gpu_generation: u64,
@@ -39,6 +45,9 @@ impl GeoScopeApp {
             dock_state,
             data_store: DataStore::new(),
             globe_renderer,
+            map_renderer: MapRenderer::new(),
+            hovmoller_renderer: HovmollerRenderer::new(),
+            spectrum_renderer: SpectrumRenderer::new(),
             ui_state: crate::ui::UiState::default(),
             data_generation: 0,
             gpu_generation: 0,
@@ -214,6 +223,9 @@ impl eframe::App for GeoScopeApp {
         let mut tab_viewer = GeoScopeTabViewer {
             data_store: &mut self.data_store,
             globe_renderer: &mut self.globe_renderer,
+            map_renderer: &mut self.map_renderer,
+            hovmoller_renderer: &mut self.hovmoller_renderer,
+            spectrum_renderer: &mut self.spectrum_renderer,
             ui_state: &mut self.ui_state,
             data_generation: &mut self.data_generation,
         };
@@ -253,6 +265,8 @@ impl eframe::App for GeoScopeApp {
                         let view_label = match tab_viewer.ui_state.view_mode {
                             crate::ui::ViewMode::Globe => "Globe",
                             crate::ui::ViewMode::Map => "Map",
+                            crate::ui::ViewMode::Hovmoller => "Hovmoller",
+                            crate::ui::ViewMode::Spectrum => "E(n)",
                         };
                         ui.label(egui::RichText::new(view_label).size(11.0).color(PRIMARY));
                     });
@@ -271,7 +285,7 @@ impl eframe::App for GeoScopeApp {
 
         // Upload field data to GPU when it changes
         if self.data_generation != self.gpu_generation {
-            if let Some(field) = self.data_store.active_field() {
+            if let Some(field) = self.data_store.active_field().cloned() {
                 if let Some(render_state) = frame.wgpu_render_state() {
                     self.globe_renderer.upload_field_data(
                         render_state,
@@ -280,16 +294,30 @@ impl eframe::App for GeoScopeApp {
                         field.height,
                         self.ui_state.colormap,
                     );
+                    self.map_renderer.ensure_initialized(render_state);
+                    self.map_renderer.upload_field_data(
+                        render_state,
+                        &field.values,
+                        field.width,
+                        field.height,
+                        self.ui_state.colormap,
+                    );
                     self.gpu_generation = self.data_generation;
 
+                    // Update Hovmoller data (equator latitude = height/2)
                     if let Some(file_idx) = self.data_store.active_file {
                         if let Some(file) = self.data_store.files.get(file_idx) {
                             if let Some(var_idx) = file.selected_variable {
                                 let var = &file.variables[var_idx];
                                 self.ui_state.status_text = format!(
-                                    "{}: {}×{}, range [{:.4e}, {:.4e}]",
+                                    "{}: {}x{}, range [{:.4e}, {:.4e}]",
                                     var.name, field.width, field.height, field.min, field.max,
                                 );
+
+                                let lat_idx = field.height / 2; // equator
+                                if let Ok(hov_data) = self.data_store.load_hovmoller_data(file_idx, var_idx, lat_idx) {
+                                    self.hovmoller_renderer.set_data(&hov_data, self.ui_state.colormap);
+                                }
                             }
                         }
                     }

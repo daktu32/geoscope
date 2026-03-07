@@ -2,6 +2,9 @@ use egui_dock::TabViewer;
 
 use crate::data::DataStore;
 use crate::renderer::GlobeRenderer;
+use crate::renderer::MapRenderer;
+use crate::renderer::hovmoller::HovmollerRenderer;
+use crate::renderer::spectrum::SpectrumRenderer;
 
 /// View mode for the viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -9,6 +12,8 @@ pub enum ViewMode {
     #[default]
     Globe,
     Map,
+    Hovmoller,
+    Spectrum,
 }
 
 /// Colormap selection.
@@ -82,6 +87,9 @@ pub enum Tab {
 pub struct GeoScopeTabViewer<'a> {
     pub data_store: &'a mut DataStore,
     pub globe_renderer: &'a mut GlobeRenderer,
+    pub map_renderer: &'a mut MapRenderer,
+    pub hovmoller_renderer: &'a mut HovmollerRenderer,
+    pub spectrum_renderer: &'a mut SpectrumRenderer,
     pub ui_state: &'a mut UiState,
     /// Incremented when field data changes, triggers GPU upload.
     pub data_generation: &'a mut u64,
@@ -207,8 +215,13 @@ impl GeoScopeTabViewer<'_> {
     }
 
     fn viewport_ui(&mut self, ui: &mut egui::Ui) {
-        // Globe / Map viewport (takes remaining space)
-        self.globe_renderer.paint(ui);
+        // Render based on current view mode
+        match self.ui_state.view_mode {
+            ViewMode::Globe => self.globe_renderer.paint(ui),
+            ViewMode::Map => self.map_renderer.paint(ui),
+            ViewMode::Hovmoller => self.hovmoller_renderer.paint(ui),
+            ViewMode::Spectrum => self.spectrum_renderer.paint(ui),
+        }
 
         // Time slider at the bottom of viewport
         if let Some(time_len) = self.active_time_dim_len() {
@@ -252,10 +265,12 @@ impl GeoScopeTabViewer<'_> {
         ui.add_space(2.0);
         ui.horizontal(|ui| {
             let primary = egui::Color32::from_rgb(0, 164, 154);
-            for mode in [ViewMode::Globe, ViewMode::Map] {
+            for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum] {
                 let label = match mode {
                     ViewMode::Globe => "Globe",
                     ViewMode::Map => "Map",
+                    ViewMode::Hovmoller => "Hovmoller",
+                    ViewMode::Spectrum => "E(n)",
                 };
                 let is_active = self.ui_state.view_mode == mode;
                 let text = if is_active {
@@ -369,14 +384,52 @@ impl GeoScopeTabViewer<'_> {
                     ui.separator();
                     ui.add_space(4.0);
 
-                    // Point info
-                    ui.label(egui::RichText::new("Point Info").size(11.0).color(egui::Color32::from_gray(160)));
+                    // Inference result
+                    let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
+                    ui.label(egui::RichText::new("Inference").size(11.0).color(egui::Color32::from_gray(160)));
                     ui.add_space(2.0);
                     ui.label(
-                        egui::RichText::new("Hover over the viewport")
-                            .size(11.0)
-                            .color(egui::Color32::from_gray(100)),
+                        egui::RichText::new(&inference.description)
+                            .size(11.0),
                     );
+                    let confidence_label = match inference.confidence {
+                        crate::data::inference::InferenceLevel::L1StandardName => "L1: standard_name",
+                        crate::data::inference::InferenceLevel::L2NamePattern => "L2: name pattern",
+                        crate::data::inference::InferenceLevel::L3Statistics => "L3: statistics",
+                    };
+                    ui.label(
+                        egui::RichText::new(confidence_label)
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(128)),
+                    );
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Export PNG button
+                    if file.field_data.is_some() {
+                        ui.label(egui::RichText::new("Export").size(11.0).color(egui::Color32::from_gray(160)));
+                        ui.add_space(2.0);
+                        if ui.button("Save PNG").clicked() {
+                            if let Some(ref field) = file.field_data {
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("PNG", &["png"])
+                                    .set_file_name(&format!("{}.png", var.name))
+                                    .save_file()
+                                {
+                                    match crate::renderer::export::export_png(field, self.ui_state.colormap, &path) {
+                                        Ok(()) => {
+                                            self.ui_state.status_text = format!("Exported: {}", path.display());
+                                        }
+                                        Err(e) => {
+                                            self.ui_state.status_text = format!("Export error: {e}");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 } else {
                     ui.add_space(20.0);
                     ui.label(

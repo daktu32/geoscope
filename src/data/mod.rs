@@ -1,11 +1,14 @@
 use std::path::Path;
 
+pub mod inference;
+
 /// Metadata for a single variable in a NetCDF file.
 #[derive(Debug, Clone)]
 pub struct VariableInfo {
     pub name: String,
     pub long_name: Option<String>,
     pub units: Option<String>,
+    pub standard_name: Option<String>,
     pub dimensions: Vec<(String, usize)>,
 }
 
@@ -181,6 +184,13 @@ impl DataStore {
                     netcdf::AttributeValue::Str(s) => Some(s),
                     _ => None,
                 });
+            let standard_name = var
+                .attribute_value("standard_name")
+                .and_then(|v| v.ok())
+                .and_then(|v| match v {
+                    netcdf::AttributeValue::Str(s) => Some(s),
+                    _ => None,
+                });
             let dimensions = var
                 .dimensions()
                 .iter()
@@ -191,6 +201,7 @@ impl DataStore {
                 name: var.name().to_string(),
                 long_name,
                 units,
+                standard_name,
                 dimensions,
             });
         }
@@ -320,6 +331,93 @@ impl DataStore {
     pub fn active_field(&self) -> Option<&FieldData> {
         let file = self.files.get(self.active_file?)?;
         file.field_data.as_ref()
+    }
+
+    /// Load all time steps for a variable at a specific latitude index,
+    /// producing a [time][lon] array suitable for a Hovmoller diagram.
+    pub fn load_hovmoller_data(
+        &self,
+        file_idx: usize,
+        var_idx: usize,
+        lat_idx: usize,
+    ) -> Result<crate::renderer::hovmoller::HovmollerData, String> {
+        let file_entry = &self.files[file_idx];
+        let var_info = &file_entry.variables[var_idx];
+
+        let file = netcdf::open(&file_entry.path)
+            .map_err(|e| format!("Failed to reopen file: {e}"))?;
+
+        let var = file
+            .variable(&var_info.name)
+            .ok_or_else(|| format!("Variable '{}' not found", var_info.name))?;
+
+        let dims = &var_info.dimensions;
+        let ndim = dims.len();
+
+        if ndim < 2 {
+            return Err("Variable must have at least 2 dimensions".to_string());
+        }
+
+        let time_dim = find_dim(dims, TIME_NAMES);
+        let n_time = time_dim.map(|(_, s)| s).unwrap_or(1);
+
+        // Last two dims are (lat, lon)
+        let n_lat = dims[ndim - 2].1;
+        let n_lon = dims[ndim - 1].1;
+
+        if lat_idx >= n_lat {
+            return Err(format!(
+                "lat_idx {lat_idx} out of range (n_lat = {n_lat})"
+            ));
+        }
+
+        let level_pos = find_dim(dims, LEVEL_NAMES).map(|(p, _)| p);
+
+        let mut all_values: Vec<f32> = Vec::with_capacity(n_time * n_lon);
+
+        for t in 0..n_time {
+            let mut start = vec![0usize; ndim];
+            let mut count: Vec<usize> = vec![1; ndim];
+
+            if let Some((tp, _)) = time_dim {
+                start[tp] = t;
+                count[tp] = 1;
+            }
+            if let Some(lp) = level_pos {
+                start[lp] = 0;
+                count[lp] = 1;
+            }
+
+            // lat: single index
+            start[ndim - 2] = lat_idx;
+            count[ndim - 2] = 1;
+            // lon: all
+            start[ndim - 1] = 0;
+            count[ndim - 1] = n_lon;
+
+            let extents: Vec<std::ops::Range<usize>> = start
+                .iter()
+                .zip(count.iter())
+                .map(|(&s, &c)| s..s + c)
+                .collect();
+
+            let row: Vec<f64> = var
+                .get_values(extents.as_slice())
+                .map_err(|e| format!("Failed to read time step {t}: {e}"))?;
+
+            all_values.extend(row.iter().map(|&v| v as f32));
+        }
+
+        let min = all_values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = all_values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+        Ok(crate::renderer::hovmoller::HovmollerData {
+            values: all_values,
+            n_lon,
+            n_time,
+            min,
+            max,
+        })
     }
 }
 
