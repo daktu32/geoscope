@@ -38,6 +38,33 @@ impl GeoScopeApp {
     }
 }
 
+impl GeoScopeApp {
+    /// Open a NetCDF file and auto-select the first non-coordinate variable.
+    pub fn open_file(&mut self, path: &std::path::Path) -> Result<(), String> {
+        self.data_store.open_file(path)?;
+        let file_idx = self.data_store.files.len() - 1;
+        let file = &self.data_store.files[file_idx];
+
+        // Find the first non-coordinate variable with 2+ dimensions
+        let var_idx = file.variables.iter().position(|v| {
+            v.dimensions.len() >= 2
+                && !(v.dimensions.len() == 1
+                    && v.dimensions[0].0 == v.name)
+        });
+
+        if let Some(vi) = var_idx {
+            self.data_store.load_field(file_idx, vi).ok();
+            self.data_generation += 1;
+        }
+
+        let name = path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        self.ui_state.status_text = format!("Opened: {name}");
+        Ok(())
+    }
+}
+
 impl eframe::App for GeoScopeApp {
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Handle drag & drop

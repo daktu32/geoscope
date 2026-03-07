@@ -21,6 +21,7 @@ struct Vertex {
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
 struct CameraUniform {
     view_proj: [[f32; 4]; 4],
+    view: [[f32; 4]; 4],
     data_range: [f32; 2], // [min, max]
     _padding: [f32; 2],
 }
@@ -162,6 +163,7 @@ impl GlobeRenderer {
         // --- Camera uniform ---
         let camera_uniform = CameraUniform {
             view_proj: identity_mat4(),
+            view: identity_mat4(),
             data_range: [0.0, 1.0],
             _padding: [0.0; 2],
         };
@@ -609,7 +611,7 @@ impl GlobeRenderer {
         if response.dragged() {
             let delta = response.drag_delta();
             let sensitivity = 0.005 / self.zoom;
-            self.cam_lon -= delta.x * sensitivity;
+            self.cam_lon += delta.x * sensitivity;
             self.cam_lat += delta.y * sensitivity;
             self.cam_lat = self.cam_lat.clamp(
                 -std::f32::consts::FRAC_PI_2 + 0.01,
@@ -627,9 +629,10 @@ impl GlobeRenderer {
         }
 
         // Build camera uniform
-        let view_proj = build_view_proj(self.cam_lon, self.cam_lat, self.zoom, rect);
+        let (view, view_proj) = build_view_proj(self.cam_lon, self.cam_lat, self.zoom, rect);
         let camera_uniform = CameraUniform {
             view_proj,
+            view,
             data_range: [self.data_min, self.data_max],
             _padding: [0.0; 2],
         };
@@ -696,24 +699,23 @@ fn generate_uv_sphere(lon_segments: u32, lat_segments: u32) -> (Vec<Vertex>, Vec
 // Camera math
 // ---------------------------------------------------------------------------
 
-fn build_view_proj(cam_lon: f32, cam_lat: f32, zoom: f32, rect: egui::Rect) -> [[f32; 4]; 4] {
+fn build_view_proj(cam_lon: f32, cam_lat: f32, zoom: f32, rect: egui::Rect) -> ([[f32; 4]; 4], [[f32; 4]; 4]) {
     // View matrix: rotate world so camera looks at (cam_lon, cam_lat)
     let (sin_lon, cos_lon) = cam_lon.sin_cos();
     let (sin_lat, cos_lat) = cam_lat.sin_cos();
 
-    // Rotation: first rotate around Y by -cam_lon, then around X by -cam_lat
-    // R_x(-lat) * R_y(-lon)
+    // Rotation: R_y(lon) * R_x(lat) — rotate world so camera looks at (lon, lat) from outside
     let rot_y = [
-        [cos_lon, 0.0, -sin_lon, 0.0],
+        [cos_lon, 0.0, sin_lon, 0.0],
         [0.0, 1.0, 0.0, 0.0],
-        [sin_lon, 0.0, cos_lon, 0.0],
+        [-sin_lon, 0.0, cos_lon, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
 
     let rot_x = [
         [1.0, 0.0, 0.0, 0.0],
-        [0.0, cos_lat, sin_lat, 0.0],
-        [0.0, -sin_lat, cos_lat, 0.0],
+        [0.0, cos_lat, -sin_lat, 0.0],
+        [0.0, sin_lat, cos_lat, 0.0],
         [0.0, 0.0, 0.0, 1.0],
     ];
 
@@ -729,13 +731,13 @@ fn build_view_proj(cam_lon: f32, cam_lat: f32, zoom: f32, rect: egui::Rect) -> [
     };
 
     let proj = [
-        [sx, 0.0, 0.0, 0.0],
-        [0.0, sy, 0.0, 0.0],
-        [0.0, 0.0, 0.5, 0.0],
-        [0.0, 0.0, 0.5, 1.0],
+        [sx,  0.0, 0.0, 0.0],
+        [0.0, sy,  0.0, 0.0],
+        [0.0, 0.0, 0.5, 0.5],
+        [0.0, 0.0, 0.0, 1.0],
     ];
 
-    mat4_mul(&proj, &view)
+    (view, mat4_mul(&proj, &view))
 }
 
 fn mat4_mul(a: &[[f32; 4]; 4], b: &[[f32; 4]; 4]) -> [[f32; 4]; 4] {
@@ -823,6 +825,7 @@ fn interpolate_lut(stops: &[(f32, [u8; 3]); 5]) -> Vec<u8> {
 const GLOBE_SHADER_WGSL: &str = r#"
 struct CameraUniform {
     view_proj: mat4x4<f32>,
+    view: mat4x4<f32>,
     data_range: vec2<f32>,
     _padding: vec2<f32>,
 };
@@ -842,24 +845,24 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) uv: vec2<f32>,
-    @location(1) world_normal: vec3<f32>,
+    @location(1) view_normal: vec3<f32>,
 };
 
 @vertex
 fn vs_main(in: VertexInput) -> VertexOutput {
     var out: VertexOutput;
-    out.clip_position = camera.view_proj * vec4<f32>(in.position, 1.0);
+    out.clip_position = vec4<f32>(in.position, 1.0) * camera.view_proj;
     out.uv = in.uv;
-    // For a unit sphere, the normal IS the position
-    let rotated = camera.view_proj * vec4<f32>(in.position, 0.0);
-    out.world_normal = rotated.xyz;
+    // Transform normal by view (rotation only) — no aspect ratio distortion
+    let rotated = vec4<f32>(in.position, 0.0) * camera.view;
+    out.view_normal = rotated.xyz;
     return out;
 }
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Discard back-facing fragments (facing away from camera)
-    let nz = in.world_normal.z;
+    let nz = in.view_normal.z;
     if nz <= 0.0 {
         discard;
     }
@@ -877,6 +880,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     // Limb darkening
     let limb = pow(nz, 0.3);
 
-    return vec4<f32>(cmap_color.rgb * limb, 1.0);
+    var color = cmap_color.rgb * limb;
+
+    // Graticule (every 30° for longitude, every 30° for latitude)
+    let lon_deg = in.uv.x * 360.0;  // 0..360
+    let lat_deg = in.uv.y * 180.0;  // 0..180 (north to south)
+    let grid_lon = abs(lon_deg % 30.0);
+    let grid_lat = abs(lat_deg % 30.0);
+    let line_width = 0.6; // in degrees
+    if grid_lon < line_width || grid_lon > (30.0 - line_width) ||
+       grid_lat < line_width || grid_lat > (30.0 - line_width) {
+        color = mix(color, vec3<f32>(0.3, 0.3, 0.3), 0.6);
+    }
+
+    return vec4<f32>(color, 1.0);
 }
 "#;
