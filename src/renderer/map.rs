@@ -7,6 +7,14 @@ use super::common::{
     generate_rdbu_r_lut, generate_viridis_lut, identity_mat4, CameraUniform, Vertex,
 };
 
+/// Map projection mode.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum MapProjection {
+    #[default]
+    Equirectangular,
+    Mollweide,
+}
+
 // ---------------------------------------------------------------------------
 // GPU resources stored in CallbackResources
 // ---------------------------------------------------------------------------
@@ -101,6 +109,7 @@ pub struct MapRenderer {
     data_max: f32,
     interpolated: bool,
     initialized: bool,
+    pub projection: MapProjection,
 }
 
 impl MapRenderer {
@@ -113,7 +122,47 @@ impl MapRenderer {
             data_max: 1.0,
             interpolated: true,
             initialized: false,
+            projection: MapProjection::default(),
         }
+    }
+
+    /// Switch projection and rebuild vertex/index buffers.
+    pub fn set_projection(
+        &mut self,
+        projection: MapProjection,
+        render_state: &egui_wgpu::RenderState,
+    ) {
+        if self.projection == projection {
+            return;
+        }
+        self.projection = projection;
+
+        let (vertices, indices) = match projection {
+            MapProjection::Equirectangular => generate_flat_grid(128, 64),
+            MapProjection::Mollweide => generate_mollweide_grid(128, 64),
+        };
+
+        let device = &render_state.device;
+        let new_vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Map Vertex Buffer"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let new_index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("Map Index Buffer"),
+            contents: bytemuck::cast_slice(&indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut renderer = render_state.renderer.write();
+        let res = renderer
+            .callback_resources
+            .get_mut::<MapGpuResources>()
+            .expect("MapGpuResources not initialized");
+
+        res.vertex_buffer = new_vertex_buffer;
+        res.index_buffer = new_index_buffer;
+        res.num_indices = indices.len() as u32;
     }
 
     pub fn ensure_initialized(&mut self, render_state: &egui_wgpu::RenderState) {
@@ -651,6 +700,76 @@ fn generate_flat_grid(lon_segments: u32, lat_segments: u32) -> (Vec<Vertex>, Vec
 
             vertices.push(Vertex {
                 position: [x, y, 0.0],
+                uv: [u, v],
+            });
+        }
+    }
+
+    for lat in 0..lat_segments {
+        for lon in 0..lon_segments {
+            let first = lat * (lon_segments + 1) + lon;
+            let second = first + lon_segments + 1;
+
+            indices.push(first);
+            indices.push(second);
+            indices.push(first + 1);
+
+            indices.push(second);
+            indices.push(second + 1);
+            indices.push(first + 1);
+        }
+    }
+
+    (vertices, indices)
+}
+
+// ---------------------------------------------------------------------------
+// Mollweide projection grid mesh generation
+// ---------------------------------------------------------------------------
+
+fn generate_mollweide_grid(lon_segments: u32, lat_segments: u32) -> (Vec<Vertex>, Vec<u32>) {
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    let sqrt2 = std::f32::consts::SQRT_2;
+
+    for lat in 0..=lat_segments {
+        let v = lat as f32 / lat_segments as f32;
+        // latitude: -pi/2 to +pi/2 (south to north)
+        let phi = std::f32::consts::PI * (0.5 - v); // v=0 → north, v=1 → south
+
+        // Solve 2*theta + sin(2*theta) = pi*sin(phi) via Newton's method
+        let target = std::f32::consts::PI * phi.sin();
+        let mut theta = phi; // initial guess
+        for _ in 0..20 {
+            let f = 2.0 * theta + (2.0 * theta).sin() - target;
+            let df = 2.0 + 2.0 * (2.0 * theta).cos();
+            if df.abs() < 1e-10 {
+                break;
+            }
+            let delta = f / df;
+            theta -= delta;
+            if delta.abs() < 1e-8 {
+                break;
+            }
+        }
+
+        for lon in 0..=lon_segments {
+            let u = lon as f32 / lon_segments as f32;
+            // longitude: -pi to +pi
+            let lambda = std::f32::consts::PI * (2.0 * u - 1.0);
+
+            // Mollweide projection formulas
+            let x = (2.0 * sqrt2 / std::f32::consts::PI) * lambda * theta.cos();
+            let y = sqrt2 * theta.sin();
+
+            // Normalize to [-1, 1] range
+            // Max x extent = 2*sqrt(2), max y extent = sqrt(2)
+            let nx = x / (2.0 * sqrt2);
+            let ny = y / sqrt2;
+
+            vertices.push(Vertex {
+                position: [nx, ny, 0.0],
                 uv: [u, v],
             });
         }

@@ -4,8 +4,10 @@ use egui_dock::{DockArea, DockState, NodeIndex};
 use crate::data::DataStore;
 use crate::renderer::GlobeRenderer;
 use crate::renderer::MapRenderer;
+use crate::renderer::cross_section::CrossSectionRenderer;
 use crate::renderer::hovmoller::HovmollerRenderer;
 use crate::renderer::spectrum::SpectrumRenderer;
+use crate::renderer::vector_overlay::VectorOverlay;
 use crate::ui::{GeoScopeTabViewer, Tab};
 
 const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0, 164, 154);
@@ -23,11 +25,16 @@ pub struct GeoScopeApp {
     map_renderer: MapRenderer,
     hovmoller_renderer: HovmollerRenderer,
     spectrum_renderer: SpectrumRenderer,
+    cross_section_renderer: CrossSectionRenderer,
+    vector_overlay: VectorOverlay,
     ui_state: crate::ui::UiState,
     data_generation: u64,
     gpu_generation: u64,
     last_colormap: crate::ui::Colormap,
     hovmoller_generation: u64,
+    cross_section_generation: u64,
+    vector_generation: u64,
+    last_map_projection: crate::renderer::map::MapProjection,
     theme_applied: bool,
 }
 
@@ -49,11 +56,16 @@ impl GeoScopeApp {
             map_renderer: MapRenderer::new(),
             hovmoller_renderer: HovmollerRenderer::new(),
             spectrum_renderer: SpectrumRenderer::new(),
+            cross_section_renderer: CrossSectionRenderer::new(),
+            vector_overlay: VectorOverlay::new(),
             ui_state: crate::ui::UiState::default(),
             data_generation: 0,
             gpu_generation: 0,
             last_colormap: crate::ui::Colormap::default(),
             hovmoller_generation: 0,
+            cross_section_generation: 0,
+            vector_generation: 0,
+            last_map_projection: crate::renderer::map::MapProjection::default(),
             theme_applied: false,
         }
     }
@@ -228,6 +240,8 @@ impl eframe::App for GeoScopeApp {
             map_renderer: &mut self.map_renderer,
             hovmoller_renderer: &mut self.hovmoller_renderer,
             spectrum_renderer: &mut self.spectrum_renderer,
+            cross_section_renderer: &mut self.cross_section_renderer,
+            vector_overlay: &mut self.vector_overlay,
             ui_state: &mut self.ui_state,
             data_generation: &mut self.data_generation,
         };
@@ -269,6 +283,7 @@ impl eframe::App for GeoScopeApp {
                             crate::ui::ViewMode::Map => "Map",
                             crate::ui::ViewMode::Hovmoller => "Hovmoller",
                             crate::ui::ViewMode::Spectrum => "E(n)",
+                            crate::ui::ViewMode::CrossSection => "Section",
                         };
                         ui.label(egui::RichText::new(view_label).size(11.0).color(PRIMARY));
                     });
@@ -344,5 +359,68 @@ impl eframe::App for GeoScopeApp {
             }
             self.hovmoller_generation = self.data_generation;
         }
+
+        // Lazy cross-section data loading
+        if self.ui_state.view_mode == crate::ui::ViewMode::CrossSection
+            && self.cross_section_generation != self.data_generation
+        {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let Some(file) = self.data_store.files.get(file_idx) {
+                    if let Some(var_idx) = file.selected_variable {
+                        let time_idx = self.ui_state.time_index;
+                        let axis = self.ui_state.cross_section_axis;
+                        let fixed_idx = self.ui_state.cross_section_idx;
+                        if let Ok(cs_data) = self.data_store.load_cross_section(
+                            file_idx, var_idx, time_idx, axis, fixed_idx,
+                        ) {
+                            self.cross_section_renderer
+                                .set_data(&cs_data, self.ui_state.colormap);
+                        }
+                    }
+                }
+            }
+            self.cross_section_generation = self.data_generation;
+        }
+
+        // Map projection switching
+        if self.ui_state.map_projection != self.last_map_projection {
+            if let Some(render_state) = frame.wgpu_render_state() {
+                self.map_renderer.set_projection(self.ui_state.map_projection, render_state);
+            }
+            self.last_map_projection = self.ui_state.map_projection;
+        }
+
+        // Vector overlay data loading
+        if self.ui_state.vector_overlay_enabled
+            && self.vector_generation != self.data_generation
+        {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let (Some(u_idx), Some(v_idx)) = (self.ui_state.vector_u_var, self.ui_state.vector_v_var) {
+                    // Save original selection before load_vector_field overwrites it
+                    let orig_var = self.data_store.files[file_idx].selected_variable;
+                    let orig_field = self.data_store.files[file_idx].field_data.clone();
+
+                    let time_idx = self.ui_state.time_index;
+                    if let Ok(vec_data) = self.data_store.load_vector_field(
+                        file_idx, u_idx, v_idx, time_idx, 0,
+                    ) {
+                        self.vector_overlay.density = self.ui_state.vector_density;
+                        self.vector_overlay.scale = self.ui_state.vector_scale;
+                        self.vector_overlay.set_data(vec_data);
+                    }
+
+                    // Restore original selected variable and field data
+                    self.data_store.files[file_idx].selected_variable = orig_var;
+                    self.data_store.files[file_idx].field_data = orig_field;
+                }
+            }
+            self.vector_generation = self.data_generation;
+        } else if !self.ui_state.vector_overlay_enabled && self.vector_overlay.has_data() {
+            self.vector_overlay.clear();
+        }
+
+        // Sync vector overlay density/scale from UI
+        self.vector_overlay.density = self.ui_state.vector_density;
+        self.vector_overlay.scale = self.ui_state.vector_scale;
     }
 }

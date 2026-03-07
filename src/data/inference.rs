@@ -3,6 +3,7 @@
 use super::{ColormapHint, FieldData, VariableInfo};
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct InferenceResult {
     pub category: VariableCategory,
     pub suggested_colormap: ColormapHint,
@@ -11,6 +12,7 @@ pub struct InferenceResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[allow(dead_code)]
 pub enum VariableCategory {
     Vorticity,
     Divergence,
@@ -209,6 +211,47 @@ fn infer_from_statistics(field: Option<&FieldData>) -> InferenceResult {
         description: "Generic field (statistics)".to_string(),
         confidence: InferenceLevel::L3Statistics,
     }
+}
+
+/// Detect a wind u/v pair from the variable list.
+/// Returns (u_var_idx, v_var_idx) if found.
+///
+/// L1: standard_name "eastward_wind" / "northward_wind"
+/// L2: name patterns: "u"/"v", "u_cos"/"v_cos", "uwnd"/"vwnd"
+/// Condition: both must have the same dimension structure.
+pub fn detect_wind_pair(variables: &[VariableInfo]) -> Option<(usize, usize)> {
+    // L1: standard_name
+    let u_sn = variables.iter().position(|v| {
+        v.standard_name.as_deref() == Some("eastward_wind")
+    });
+    let v_sn = variables.iter().position(|v| {
+        v.standard_name.as_deref() == Some("northward_wind")
+    });
+    if let (Some(ui), Some(vi)) = (u_sn, v_sn) {
+        if variables[ui].dimensions == variables[vi].dimensions {
+            return Some((ui, vi));
+        }
+    }
+
+    // L2: name patterns
+    let u_patterns = ["u", "u_cos", "uwnd"];
+    let v_patterns = ["v", "v_cos", "vwnd"];
+
+    for (up, vp) in u_patterns.iter().zip(v_patterns.iter()) {
+        let u_idx = variables.iter().position(|v| {
+            v.name.eq_ignore_ascii_case(up)
+        });
+        let v_idx = variables.iter().position(|v| {
+            v.name.eq_ignore_ascii_case(vp)
+        });
+        if let (Some(ui), Some(vi)) = (u_idx, v_idx) {
+            if variables[ui].dimensions == variables[vi].dimensions {
+                return Some((ui, vi));
+            }
+        }
+    }
+
+    None
 }
 
 #[cfg(test)]

@@ -23,6 +23,7 @@ pub enum ColormapHint {
 
 /// Coordinate values extracted from a NetCDF file.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct GridInfo {
     pub lon: Option<Vec<f64>>,
     pub lat: Option<Vec<f64>>,
@@ -30,6 +31,7 @@ pub struct GridInfo {
 
 /// Metadata and data for an opened NetCDF file.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub struct OpenFile {
     pub path: String,
     pub variables: Vec<VariableInfo>,
@@ -52,6 +54,35 @@ pub struct FieldData {
     pub height: usize,
     pub min: f32,
     pub max: f32,
+}
+
+/// Axis for cross-section slicing.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum CrossSectionAxis {
+    #[default]
+    Latitude,
+    Longitude,
+}
+
+/// 2D cross-section data: level vs lat or lon.
+#[derive(Debug, Clone)]
+pub struct CrossSectionData {
+    pub values: Vec<f32>, // row-major [level][spatial]
+    pub n_levels: usize,
+    pub n_spatial: usize,
+    pub min: f32,
+    pub max: f32,
+    pub axis: CrossSectionAxis,
+}
+
+/// Vector field data (u, v components) for overlay rendering.
+#[derive(Debug, Clone)]
+pub struct VectorFieldData {
+    pub u_values: Vec<f32>,
+    pub v_values: Vec<f32>,
+    pub width: usize,
+    pub height: usize,
+    pub max_magnitude: f32,
 }
 
 /// Central data store for the application.
@@ -95,6 +126,7 @@ pub fn validate_netcdf_path(path: &Path) -> Result<(), String> {
 /// 2. Name starts with `temp` or equals `T` with units containing `K` → Sequential
 /// 3. min * max < 0 (data spans zero) → Diverging
 /// 4. Otherwise → Sequential
+#[allow(dead_code)]
 pub fn infer_colormap(var: &VariableInfo, field: Option<&FieldData>) -> ColormapHint {
     let name_lower = var.name.to_ascii_lowercase();
 
@@ -326,6 +358,136 @@ impl DataStore {
         });
 
         Ok(())
+    }
+
+    /// Load a cross-section: all levels at a fixed lat or lon index.
+    pub fn load_cross_section(
+        &self,
+        file_idx: usize,
+        var_idx: usize,
+        time_idx: usize,
+        axis: CrossSectionAxis,
+        fixed_idx: usize,
+    ) -> Result<CrossSectionData, String> {
+        let file_entry = &self.files[file_idx];
+        let var_info = &file_entry.variables[var_idx];
+
+        let file = netcdf::open(&file_entry.path)
+            .map_err(|e| format!("Failed to reopen file: {e}"))?;
+
+        let var = file
+            .variable(&var_info.name)
+            .ok_or_else(|| format!("Variable '{}' not found", var_info.name))?;
+
+        let dims = &var_info.dimensions;
+        let ndim = dims.len();
+
+        let level_dim = find_dim(dims, LEVEL_NAMES)
+            .ok_or_else(|| "Variable has no level dimension".to_string())?;
+        let (level_pos, n_levels) = level_dim;
+
+        if ndim < 3 {
+            return Err("Variable must have at least 3 dimensions (time/level/lat/lon)".to_string());
+        }
+
+        let n_lat = dims[ndim - 2].1;
+        let n_lon = dims[ndim - 1].1;
+        let time_pos = find_dim(dims, TIME_NAMES).map(|(p, _)| p);
+
+        let n_spatial = match axis {
+            CrossSectionAxis::Latitude => n_lon,   // fix lat, vary lon
+            CrossSectionAxis::Longitude => n_lat,  // fix lon, vary lat
+        };
+
+        let mut all_values: Vec<f32> = Vec::with_capacity(n_levels * n_spatial);
+
+        for lev in 0..n_levels {
+            let mut start = vec![0usize; ndim];
+            let mut count: Vec<usize> = vec![1; ndim];
+
+            if let Some(tp) = time_pos {
+                start[tp] = time_idx;
+            }
+            start[level_pos] = lev;
+
+            match axis {
+                CrossSectionAxis::Latitude => {
+                    // fix lat, read all lon
+                    start[ndim - 2] = fixed_idx;
+                    count[ndim - 2] = 1;
+                    start[ndim - 1] = 0;
+                    count[ndim - 1] = n_lon;
+                }
+                CrossSectionAxis::Longitude => {
+                    // fix lon, read all lat
+                    start[ndim - 2] = 0;
+                    count[ndim - 2] = n_lat;
+                    start[ndim - 1] = fixed_idx;
+                    count[ndim - 1] = 1;
+                }
+            }
+
+            let extents: Vec<std::ops::Range<usize>> = start
+                .iter()
+                .zip(count.iter())
+                .map(|(&s, &c)| s..s + c)
+                .collect();
+
+            let row: Vec<f64> = var
+                .get_values(extents.as_slice())
+                .map_err(|e| format!("Failed to read level {lev}: {e}"))?;
+
+            all_values.extend(row.iter().map(|&v| v as f32));
+        }
+
+        let min = all_values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = all_values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+        Ok(CrossSectionData {
+            values: all_values,
+            n_levels,
+            n_spatial,
+            min,
+            max,
+            axis,
+        })
+    }
+
+    /// Load u and v vector field components at a given time and level.
+    pub fn load_vector_field(
+        &mut self,
+        file_idx: usize,
+        u_var_idx: usize,
+        v_var_idx: usize,
+        time_idx: usize,
+        level_idx: usize,
+    ) -> Result<VectorFieldData, String> {
+        // Load u component
+        self.load_field_at(file_idx, u_var_idx, time_idx, level_idx)?;
+        let u_field = self.files[file_idx].field_data.clone()
+            .ok_or_else(|| "Failed to load u field".to_string())?;
+
+        // Load v component
+        self.load_field_at(file_idx, v_var_idx, time_idx, level_idx)?;
+        let v_field = self.files[file_idx].field_data.clone()
+            .ok_or_else(|| "Failed to load v field".to_string())?;
+
+        if u_field.width != v_field.width || u_field.height != v_field.height {
+            return Err("u and v fields have different dimensions".to_string());
+        }
+
+        let max_magnitude = u_field.values.iter()
+            .zip(v_field.values.iter())
+            .map(|(&u, &v)| (u * u + v * v).sqrt())
+            .fold(0.0f32, f32::max);
+
+        Ok(VectorFieldData {
+            u_values: u_field.values,
+            v_values: v_field.values,
+            width: u_field.width,
+            height: u_field.height,
+            max_magnitude,
+        })
     }
 
     pub fn active_field(&self) -> Option<&FieldData> {

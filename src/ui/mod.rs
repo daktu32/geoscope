@@ -3,8 +3,11 @@ use egui_dock::TabViewer;
 use crate::data::DataStore;
 use crate::renderer::GlobeRenderer;
 use crate::renderer::MapRenderer;
+use crate::renderer::cross_section::CrossSectionRenderer;
 use crate::renderer::hovmoller::HovmollerRenderer;
+use crate::renderer::map::MapProjection;
 use crate::renderer::spectrum::SpectrumRenderer;
+use crate::renderer::vector_overlay::VectorOverlay;
 
 /// View mode for the viewport.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -14,6 +17,7 @@ pub enum ViewMode {
     Map,
     Hovmoller,
     Spectrum,
+    CrossSection,
 }
 
 /// Colormap selection.
@@ -48,6 +52,17 @@ pub struct UiState {
     play_accumulator: f64,
     /// When true, use bilinear interpolation for field data; otherwise nearest-neighbor (grid-point).
     pub interpolated: bool,
+    // Map projection
+    pub map_projection: MapProjection,
+    // Cross-section settings
+    pub cross_section_axis: crate::data::CrossSectionAxis,
+    pub cross_section_idx: usize,
+    // Vector overlay settings
+    pub vector_overlay_enabled: bool,
+    pub vector_u_var: Option<usize>,
+    pub vector_v_var: Option<usize>,
+    pub vector_density: usize,
+    pub vector_scale: f32,
 }
 
 impl Default for UiState {
@@ -61,6 +76,14 @@ impl Default for UiState {
             play_speed: 10.0,
             play_accumulator: 0.0,
             interpolated: true,
+            map_projection: MapProjection::default(),
+            cross_section_axis: crate::data::CrossSectionAxis::default(),
+            cross_section_idx: 0,
+            vector_overlay_enabled: false,
+            vector_u_var: None,
+            vector_v_var: None,
+            vector_density: 8,
+            vector_scale: 1.0,
         }
     }
 }
@@ -80,6 +103,8 @@ pub struct GeoScopeTabViewer<'a> {
     pub map_renderer: &'a mut MapRenderer,
     pub hovmoller_renderer: &'a mut HovmollerRenderer,
     pub spectrum_renderer: &'a mut SpectrumRenderer,
+    pub cross_section_renderer: &'a mut CrossSectionRenderer,
+    pub vector_overlay: &'a mut VectorOverlay,
     pub ui_state: &'a mut UiState,
     /// Incremented when field data changes, triggers GPU upload.
     pub data_generation: &'a mut u64,
@@ -238,12 +263,13 @@ impl GeoScopeTabViewer<'_> {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     let primary = egui::Color32::from_rgb(0, 164, 154);
-                    for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum] {
+                    for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum, ViewMode::CrossSection] {
                         let label = match mode {
                             ViewMode::Globe => "Globe",
                             ViewMode::Map => "Map",
                             ViewMode::Hovmoller => "Hovmoller",
                             ViewMode::Spectrum => "E(n)",
+                            ViewMode::CrossSection => "Section",
                         };
                         let is_active = self.ui_state.view_mode == mode;
                         let text = if is_active {
@@ -321,10 +347,45 @@ impl GeoScopeTabViewer<'_> {
         let central = ui.available_rect_before_wrap();
         let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(central));
         match self.ui_state.view_mode {
-            ViewMode::Globe => self.globe_renderer.paint(&mut child_ui),
-            ViewMode::Map => self.map_renderer.paint(&mut child_ui),
+            ViewMode::Globe => {
+                self.globe_renderer.paint(&mut child_ui);
+                if self.ui_state.vector_overlay_enabled {
+                    // Must use the same padded rect as GlobeRenderer::paint()
+                    let avail = central.size();
+                    let pad_x = (avail.x * 0.05).max(8.0);
+                    let pad_y = (avail.y * 0.05).max(8.0);
+                    let padded = egui::vec2(avail.x - pad_x * 2.0, avail.y - pad_y * 2.0);
+                    let globe_rect = egui::Rect::from_center_size(central.center(), padded);
+
+                    let (view, view_proj) = crate::renderer::common::build_view_proj(
+                        self.globe_renderer.cam_lon,
+                        self.globe_renderer.cam_lat,
+                        self.globe_renderer.zoom,
+                        globe_rect,
+                    );
+                    self.vector_overlay.paint_on_globe(
+                        child_ui.painter(),
+                        globe_rect,
+                        &view,
+                        &view_proj,
+                    );
+                }
+            }
+            ViewMode::Map => {
+                self.map_renderer.paint(&mut child_ui);
+                if self.ui_state.vector_overlay_enabled {
+                    self.vector_overlay.paint_on_map(
+                        child_ui.painter(),
+                        central,
+                        self.map_renderer.pan_x,
+                        self.map_renderer.pan_y,
+                        self.map_renderer.zoom,
+                    );
+                }
+            }
             ViewMode::Hovmoller => self.hovmoller_renderer.paint(&mut child_ui),
             ViewMode::Spectrum => self.spectrum_renderer.paint(&mut child_ui),
+            ViewMode::CrossSection => self.cross_section_renderer.paint(&mut child_ui),
         }
         ui.allocate_rect(central, egui::Sense::hover());
     }
@@ -451,6 +512,139 @@ impl GeoScopeTabViewer<'_> {
                     ui.separator();
                     ui.add_space(4.0);
 
+                    // Map projection selector (only in Map view)
+                    if self.ui_state.view_mode == ViewMode::Map {
+                        ui.label(egui::RichText::new("Projection").size(11.0).color(egui::Color32::from_gray(160)));
+                        ui.add_space(2.0);
+                        egui::ComboBox::from_id_salt("projection_combo")
+                            .selected_text(match self.ui_state.map_projection {
+                                MapProjection::Equirectangular => "Equirectangular",
+                                MapProjection::Mollweide => "Mollweide",
+                            })
+                            .width(ui.available_width() - 8.0)
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.ui_state.map_projection,
+                                    MapProjection::Equirectangular,
+                                    "Equirectangular",
+                                );
+                                ui.selectable_value(
+                                    &mut self.ui_state.map_projection,
+                                    MapProjection::Mollweide,
+                                    "Mollweide",
+                                );
+                            });
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    }
+
+                    // Cross-section settings (only in CrossSection view)
+                    if self.ui_state.view_mode == ViewMode::CrossSection {
+                        ui.label(egui::RichText::new("Cross Section").size(11.0).color(egui::Color32::from_gray(160)));
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Axis:").size(11.0));
+                            if ui.selectable_label(
+                                self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Latitude,
+                                egui::RichText::new("Fix Lat").size(11.0),
+                            ).clicked() {
+                                self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Latitude;
+                                *self.data_generation += 1;
+                            }
+                            if ui.selectable_label(
+                                self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Longitude,
+                                egui::RichText::new("Fix Lon").size(11.0),
+                            ).clicked() {
+                                self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Longitude;
+                                *self.data_generation += 1;
+                            }
+                        });
+
+                        let max_idx = if let Some(ref field) = file.field_data {
+                            match self.ui_state.cross_section_axis {
+                                crate::data::CrossSectionAxis::Latitude => field.height.saturating_sub(1),
+                                crate::data::CrossSectionAxis::Longitude => field.width.saturating_sub(1),
+                            }
+                        } else {
+                            0
+                        };
+
+                        if max_idx > 0 {
+                            let mut idx = self.ui_state.cross_section_idx.min(max_idx);
+                            let slider = egui::Slider::new(&mut idx, 0..=max_idx)
+                                .text("Index");
+                            if ui.add(slider).changed() {
+                                self.ui_state.cross_section_idx = idx;
+                                *self.data_generation += 1;
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    }
+
+                    // Vector overlay settings (Globe/Map views)
+                    if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
+                        ui.label(egui::RichText::new("Vector Overlay").size(11.0).color(egui::Color32::from_gray(160)));
+                        ui.add_space(2.0);
+                        ui.checkbox(&mut self.ui_state.vector_overlay_enabled, "Enabled");
+
+                        if self.ui_state.vector_overlay_enabled {
+                            // Auto-detect u/v pair if not set
+                            if self.ui_state.vector_u_var.is_none() {
+                                if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
+                                    self.ui_state.vector_u_var = Some(u_idx);
+                                    self.ui_state.vector_v_var = Some(v_idx);
+                                }
+                            }
+
+                            // u/v variable selectors
+                            let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("u:").size(11.0));
+                                let mut u_idx = self.ui_state.vector_u_var.unwrap_or(0);
+                                egui::ComboBox::from_id_salt("vector_u_combo")
+                                    .selected_text(var_names.get(u_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                    .width(80.0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, name) in var_names.iter().enumerate() {
+                                            ui.selectable_value(&mut u_idx, i, name);
+                                        }
+                                    });
+                                self.ui_state.vector_u_var = Some(u_idx);
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("v:").size(11.0));
+                                let mut v_idx = self.ui_state.vector_v_var.unwrap_or(0);
+                                egui::ComboBox::from_id_salt("vector_v_combo")
+                                    .selected_text(var_names.get(v_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                    .width(80.0)
+                                    .show_ui(ui, |ui| {
+                                        for (i, name) in var_names.iter().enumerate() {
+                                            ui.selectable_value(&mut v_idx, i, name);
+                                        }
+                                    });
+                                self.ui_state.vector_v_var = Some(v_idx);
+                            });
+
+                            // Density and scale sliders
+                            let mut density = self.ui_state.vector_density;
+                            if ui.add(egui::Slider::new(&mut density, 2..=20).text("Density")).changed() {
+                                self.ui_state.vector_density = density;
+                            }
+                            let mut scale = self.ui_state.vector_scale;
+                            if ui.add(egui::Slider::new(&mut scale, 0.1..=5.0).text("Scale")).changed() {
+                                self.ui_state.vector_scale = scale;
+                            }
+                        }
+
+                        ui.add_space(8.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                    }
+
                     // Inference result
                     let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
                     ui.label(egui::RichText::new("Inference").size(11.0).color(egui::Color32::from_gray(160)));
@@ -515,7 +709,7 @@ impl GeoScopeTabViewer<'_> {
     }
 
     /// Returns the length of the time dimension for the active variable, if any.
-    fn active_time_dim_len(&self) -> Option<usize> {
+    pub fn active_time_dim_len(&self) -> Option<usize> {
         let file = self.data_store.files.get(self.data_store.active_file?)?;
         let var_idx = file.selected_variable?;
         let var = &file.variables[var_idx];

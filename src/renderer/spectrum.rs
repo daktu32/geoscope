@@ -2,6 +2,7 @@
 
 /// Energy spectrum data: E(n) for n = 0, 1, ..., n_max.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SpectrumData {
     pub energy: Vec<f64>, // E(n) for n=0,1,...,n_max
     pub n_max: usize,
@@ -17,6 +18,7 @@ impl SpectrumRenderer {
         Self { data: None }
     }
 
+    #[allow(dead_code)]
     pub fn set_data(&mut self, data: SpectrumData) {
         self.data = Some(data);
     }
