@@ -21,7 +21,7 @@ Pencil (.pen) ファイルによるインタラクティブモックアップの
 | `Vadwy` | Level 2: Explorer | Data Browser + Inspector + Code Panel 全表示 |
 | `DW8H0` | Level 3: Code Mode | Rhai/Python コードエディタ中心のレイアウト |
 
-### 追加画面 (5 screens)
+### 追加画面 (7 screens)
 
 | ID | Name | Description |
 |----|------|-------------|
@@ -30,6 +30,8 @@ Pencil (.pen) ファイルによるインタラクティブモックアップの
 | `BhlDU` | A3: Spectrum View | E(n) エネルギースペクトル log-log プロット。n^-3 参照線付き |
 | `cgUZf` | A4: Fullscreen Mode | 地球儀最大化。HUD オーバーレイ (変数名/座標/値/時刻) |
 | `fQYeH` | A5: Variable Label | ビューポート上の変数メタデータオーバーレイ (名前/次元/範囲) |
+| `ufE2l` | A6: Copilot Chat | L2 下部に Copilot タブ。物理的解説 + アクション提案ボタン |
+| `b3WM2` | A7: Command Palette | Cmd+K オーバーレイ。自然言語→候補リスト→Rhai コード生成プレビュー |
 
 ---
 
@@ -103,3 +105,6 @@ Pencil (.pen) ファイルによるインタラクティブモックアップの
 3. **HUD パターン**: フルスクリーン時は半透明オーバーレイで最小限の情報表示
 4. **カラーマップ規約**: 温度=sequential (inferno)、偏差=diverging (RdBu_r)、自動判定あり
 5. **Onboarding**: 初回のみ、3 ステップの非モーダルヒントカード
+6. **Copilot 配置**: Code Panel とタブ同居。L2 で出現 (Progressive Disclosure 整合)
+7. **Command Palette**: Cmd+K で起動。自然言語→Rhai コード→確認→実行
+8. **アクション提案**: Copilot がチャット内にクリック可能なアクションボタンを提示
