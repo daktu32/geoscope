@@ -62,6 +62,9 @@ pub struct UiState {
     pub colormap: Colormap,
     pub time_index: usize,
     pub status_text: String,
+    pub playing: bool,
+    pub play_speed: f32,
+    play_accumulator: f64,
 }
 
 impl Default for UiState {
@@ -71,6 +74,9 @@ impl Default for UiState {
             colormap: Colormap::default(),
             time_index: 0,
             status_text: "Ready".to_string(),
+            playing: false,
+            play_speed: 10.0,
+            play_accumulator: 0.0,
         }
     }
 }
@@ -226,10 +232,39 @@ impl GeoScopeTabViewer<'_> {
         // Time slider at the bottom of viewport
         if let Some(time_len) = self.active_time_dim_len() {
             if time_len > 1 {
+                // Auto-play: advance time based on elapsed time
+                if self.ui_state.playing {
+                    let dt = ui.input(|i| i.stable_dt) as f64;
+                    self.ui_state.play_accumulator += dt * self.ui_state.play_speed as f64;
+                    let steps = self.ui_state.play_accumulator as usize;
+                    if steps > 0 {
+                        self.ui_state.play_accumulator -= steps as f64;
+                        let new_t = (self.ui_state.time_index + steps) % time_len;
+                        if new_t != self.ui_state.time_index {
+                            self.ui_state.time_index = new_t;
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        if self.data_store.load_field_at(fi, vi, new_t, 0).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ui.ctx().request_repaint();
+                }
+
                 ui.add_space(2.0);
                 ui.horizontal(|ui| {
-                    // Play button placeholder
-                    ui.label(egui::RichText::new("▶").size(12.0));
+                    // Play/Pause button
+                    let icon = if self.ui_state.playing { "⏸" } else { "▶" };
+                    if ui.button(egui::RichText::new(icon).size(12.0)).clicked() {
+                        self.ui_state.playing = !self.ui_state.playing;
+                        self.ui_state.play_accumulator = 0.0;
+                    }
+
                     ui.label(
                         egui::RichText::new(format!("t={}", self.ui_state.time_index))
                             .monospace()
@@ -246,7 +281,7 @@ impl GeoScopeTabViewer<'_> {
                         .show_value(false);
                     if ui.add(slider).changed() {
                         self.ui_state.time_index = t;
-                        // Reload field data at new time index
+                        self.ui_state.playing = false;
                         if let Some(fi) = self.data_store.active_file {
                             if let Some(file) = self.data_store.files.get(fi) {
                                 if let Some(vi) = file.selected_variable {
@@ -256,6 +291,19 @@ impl GeoScopeTabViewer<'_> {
                                 }
                             }
                         }
+                    }
+
+                    // Speed control
+                    ui.separator();
+                    ui.label(egui::RichText::new("×").size(11.0).color(egui::Color32::from_gray(128)));
+                    let mut speed = self.ui_state.play_speed;
+                    let speed_slider = egui::Slider::new(&mut speed, 1.0..=60.0)
+                        .logarithmic(true)
+                        .show_value(true)
+                        .suffix(" fps")
+                        .custom_formatter(|v, _| format!("{:.0}", v));
+                    if ui.add_sized([120.0, 18.0], speed_slider).changed() {
+                        self.ui_state.play_speed = speed;
                     }
                 });
             }
