@@ -4,6 +4,8 @@
 
 GFD (Geophysical Fluid Dynamics) data visualization desktop application — a modern replacement for GrADS/Panoply with LLM-powered assistance.
 
+<p align="center"><img src="docs/screenshots/a6-copilot-chat.png" width="800" alt="GeoScope with LLM Copilot — ask about your data, get physical explanations"></p>
+
 ![Status](https://img.shields.io/badge/status-design%20phase-blue)
 ![Language](https://img.shields.io/badge/language-Rust-orange)
 ![License](https://img.shields.io/badge/license-TBD-lightgrey)
