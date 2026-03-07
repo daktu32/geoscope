@@ -15,6 +15,8 @@ pub struct GeoScopeApp {
     data_generation: u64,
     /// Last generation uploaded to GPU.
     gpu_generation: u64,
+    /// Track colormap changes.
+    last_colormap: crate::ui::Colormap,
 }
 
 impl GeoScopeApp {
@@ -34,6 +36,7 @@ impl GeoScopeApp {
             ui_state: crate::ui::UiState::default(),
             data_generation: 0,
             gpu_generation: 0,
+            last_colormap: crate::ui::Colormap::default(),
         }
     }
 }
@@ -112,6 +115,12 @@ impl eframe::App for GeoScopeApp {
             .style(egui_dock::Style::from_egui(ctx.style().as_ref()))
             .show(ctx, &mut tab_viewer);
 
+        // Detect colormap change
+        if self.ui_state.colormap != self.last_colormap {
+            self.last_colormap = self.ui_state.colormap;
+            self.data_generation += 1;
+        }
+
         // Upload field data to GPU when it changes
         if self.data_generation != self.gpu_generation {
             if let Some(field) = self.data_store.active_field() {
@@ -121,6 +130,7 @@ impl eframe::App for GeoScopeApp {
                         &field.values,
                         field.width,
                         field.height,
+                        self.ui_state.colormap,
                     );
                     self.gpu_generation = self.data_generation;
 

@@ -414,6 +414,7 @@ impl GlobeRenderer {
         data: &[f32],
         width: usize,
         height: usize,
+        colormap: crate::ui::Colormap,
     ) {
         let device = &render_state.device;
         let queue = &render_state.queue;
@@ -489,8 +490,10 @@ impl GlobeRenderer {
             ..Default::default()
         });
 
-        // Regenerate colormap for the existing LUT (we keep the same)
-        let colormap_data = generate_viridis_lut();
+        let colormap_data = match colormap {
+            crate::ui::Colormap::Viridis => generate_viridis_lut(),
+            crate::ui::Colormap::RdBuR => generate_rdbu_r_lut(),
+        };
         let colormap_texture = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {
@@ -777,7 +780,6 @@ fn generate_viridis_lut() -> Vec<u8> {
     interpolate_lut(&stops)
 }
 
-#[allow(dead_code)]
 fn generate_rdbu_r_lut() -> Vec<u8> {
     let stops: [(f32, [u8; 3]); 5] = [
         (0.0, [5, 48, 97]),

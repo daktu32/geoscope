@@ -165,13 +165,9 @@ impl GeoScopeTabViewer<'_> {
         });
         ui.separator();
 
-        // Globe / Map viewport
-        self.globe_renderer.paint(ui);
-
         // Time slider (if active variable has a time dimension)
         if let Some(time_len) = self.active_time_dim_len() {
             if time_len > 1 {
-                ui.separator();
                 ui.horizontal(|ui| {
                     ui.label("Time:");
                     let mut t = self.ui_state.time_index;
@@ -185,10 +181,24 @@ impl GeoScopeTabViewer<'_> {
                         .text(format!("/ {}", time_len - 1));
                     if ui.add(slider).changed() {
                         self.ui_state.time_index = t;
+                        // Reload field data at new time index
+                        if let Some(fi) = self.data_store.active_file {
+                            if let Some(file) = self.data_store.files.get(fi) {
+                                if let Some(vi) = file.selected_variable {
+                                    if self.data_store.load_field_at(fi, vi, t, 0).is_ok() {
+                                        *self.data_generation += 1;
+                                    }
+                                }
+                            }
+                        }
                     }
                 });
+                ui.separator();
             }
         }
+
+        // Globe / Map viewport
+        self.globe_renderer.paint(ui);
     }
 
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
