@@ -3,89 +3,60 @@
 ## Overview
 GFD (地球流体力学) データ可視化デスクトップアプリケーション。
 
-## Current Status: v0.1a Tech PoC (Skeleton Complete)
+## Current Status: v0.1b — 使える最小形 (In Progress)
 
-### Done
+### Done (設計・準備)
 - [x] 既存ツール調査と課題分析 (Panoply, GrADS, ParaView, ncview 等)
-- [x] PRD v0.2.0 作成 (`docs/PRD.md`)
-  - ペルソナ定義 (院生/D2/准教授)
-  - Progressive Disclosure (L0-L3) 設計
-  - 3-stage fallback 変数推定
-  - GUI Master モードのコード同期
-  - レスポンシブレイアウト規約
-  - MVP スコープ分割 (v0.1a/v0.1b/v0.2/v0.3)
+- [x] PRD v0.3.0 作成 (`docs/PRD.md`)
 - [x] 専門家パネル設計レビュー (`docs/DESIGN_REVIEW.md`)
-  - テックスタック評価
-  - UX デザイン改善提案
-  - GFD ドメインギャップ分析
-  - 20 件の具体的修正提案 (M1-M20)
-- [x] レビュー結果の PRD 反映 (16+ 編集)
-- [x] Pencil モックアップ作成 (9 画面)
-  - Level 0: Welcome (ファイルドロップ)
-  - Level 1: Basic View (地球儀 + サイドバー)
-  - Level 2: Explorer (全パネル表示)
-  - Level 3: Code Mode (コードエディタ)
-  - A1: Onboarding Overlay (3 ヒントカード)
-  - A2: Hovmoller View (時間-経度ヒートマップ)
-  - A3: Spectrum View (E(n) log-log プロット)
-  - A4: Fullscreen Mode (HUD オーバーレイ)
-  - A5: Variable Label (変数メタデータ表示)
+- [x] Pencil モックアップ作成 (11 画面: L0-L3, A1-A7)
 - [x] ペルソナ検証 (`docs/MOCKUP_GUIDE.md`)
-- [x] PRD v0.3.0 — LLM Copilot 機能追加
-  - チャットサイドバー (Code Panel とタブ同居)
-  - コマンドパレット (Cmd+K)
-  - ハイブリッド LLM (クラウド API + ローカル LLM)
-  - コンテキスト階層設計 (Layer 0-3, メタデータのみ送信)
-  - GFD ドメイン知識 (スペクトル法、典型パターン辞書)
-  - 出力経路: LLM → Rhai コード → ユーザー確認 → 実行
-  - v0.2 スコープ: Explain + Explore モード
-  - v0.3 スコープ: Suggest モード + コンテキストメニュー + インライン注釈
-- [x] LLM Copilot モックアップ (A6 Chat + A7 Command Palette)
-- [x] README 作成 + スクリーンショット11枚埋め込み
-- [x] GitHub リポジトリ作成 (private): https://github.com/daktu32/geoscope
-- [x] ロゴデザイン (案B: Scope 強調型を採用)
-- [x] GitHub Issues 登録 (#1-#6)
-- [x] **v0.1a 技術 PoC — スケルトン実装完了**
-  - Cargo プロジェクト初期化 (eframe 0.33 + wgpu 27 + egui_dock 0.18 + netcdf 0.12)
-  - egui_dock 3カラムレイアウト (Data Browser / Viewport / Inspector)
-  - wgpu 球面レンダラー (UV sphere mesh, WGSL shader, カメラ回転・ズーム)
-  - カラーマップ LUT (viridis 256-entry, RdBu_r 準備済み)
-  - データテクスチャ (R32Float, GPU アップロード)
-  - NetCDF 読み込み (netcdf 0.12, 変数メタデータ, 2D スライス抽出)
-  - D&D ファイル読み込み (.nc/.nc4/.netcdf フィルタリング)
-  - Data Browser (変数ツリー, ツールチップ, ダブルクリックでロード)
-  - Inspector (変数情報, カラーマップ ComboBox, 値範囲)
-  - タイムスライダー (time 次元自動検出)
-  - ビュータブ (Globe / Map 切替 UI)
-  - ステータスバー (変数名, サイズ, 値範囲)
-  - 時間/鉛直次元の自動検出 (time/t, level/lev/z/sigma)
-  - 座標値の読み取り (lon/lat)
-  - 変数推論の基礎 (infer_colormap: PRD 4.1 準拠)
-  - Data Browser → GPU 自動アップロード統合
-  - アプリ起動確認 (macOS Metal バックエンド)
+- [x] GitHub リポジトリ作成 + Issues 登録 (#1-#6)
+- [x] ロゴデザイン (案B: Scope 強調型)
 
-### Done (v0.1a 実地テスト・機能追加)
-- [x] サンプル NetCDF ファイルで Globe 描画の実地テスト (rossby_haurwitz.nc)
-- [x] Globe レンダリングバグ修正
-  - row-major/column-major 行列レイアウト修正 (WGSL: vec*matrix)
-  - 正射影行列修正 (w'=1 固定、逆パース解消)
-  - ビュー回転方向修正 (外側から見るカメラ)
-  - ドラッグ方向を直感に合わせる
-- [x] 30° 間隔の経緯線 (グラティキュール) 描画
-- [x] タイムスライダー操作でデータ再ロード → GPU アップロード連動
-- [x] カラーマップ切替 (Inspector の ComboBox → GPU LUT 差替: viridis / RdBu_r)
-- [x] CLI 引数でファイルを開く機能
+### Done (v0.1a — 技術 PoC)
+- [x] Cargo プロジェクト初期化 (eframe 0.33 + wgpu 27 + egui_dock 0.18 + netcdf 0.12)
+- [x] egui_dock 3カラムレイアウト (Data Browser / Viewport / Inspector)
+- [x] wgpu 球面レンダラー (UV sphere, WGSL shader, 正射影, カメラ回転・ズーム)
+- [x] 30° 経緯線 (グラティキュール) 描画
+- [x] カラーマップ LUT (viridis / RdBu_r, GPU テクスチャ差替)
+- [x] データテクスチャ (R32Float, GPU アップロード)
+- [x] NetCDF 読み込み (netcdf 0.12, 変数メタデータ, 2D スライス, 時間/鉛直スライス)
+- [x] D&D ファイル読み込み + CLI 引数対応
+- [x] Data Browser (変数ツリー, シングルクリック選択, 次元ラベル)
+- [x] Inspector (変数情報, カラーマップ ComboBox + グラデーションプレビュー, 値範囲)
+- [x] タイムスライダー (time 次元自動検出, データ再ロード → GPU 連動)
+- [x] ステータスバー (変数名, サイズ, 値範囲)
+- [x] ダークテーマ UI (モック準拠, カスタム Visuals + egui_dock Style)
+- [x] トップバー (アプリ名 + アクティブファイル名)
 
-### Next Steps (v0.1a 残タスク)
-- [ ] ピボット判断: egui + wgpu の統合品質評価
+### Done (ピボット判断)
+- [x] **egui + wgpu で続行を決定** (Tauri ピボットしない)
+  - Inspector / Data Browser: 問題なく実装可能 → PRD 判断基準クリア
+  - パフォーマンス: 128×64×1001 データで 60fps、GPU アップロード瞬時
+  - テーマ: Visuals カスタマイズでモック準拠のダーク UI 実現
+  - Tauri ピボットのコスト (JS/TS 移行, ビルド変更) に見合わない
+  - wgpu の WebAssembly 対応パスは維持される
 
-### Next Steps (デザイン)
+### Next (v0.1b — 使える最小形)
+
+目標: 「Panoply より快適に dcmodel 出力を見られる」
+
+- [ ] Map ビュー (Equirectangular 投影)
+- [ ] 自動推論強化 (3段階フォールバック: standard_name → 名前パターン → データ特性)
+- [ ] ホフメラー図 (時間-経度ヒートマップ)
+- [ ] E(n) エネルギースペクトル図 (1D log-log)
+- [ ] ベクトル場 (矢印) 重ね合わせ
+- [ ] PNG エクスポート
+- [ ] Mollweide 投影
+
+### Next (デザイン)
 - [ ] ロゴの最終調整・エクスポート (SVG/PNG) — Issue #1
 - [ ] README にロゴ埋め込み — Issue #2
 - [ ] エクスポート UI ダイアログのモックアップ — Issue #3
 - [ ] ベクトル場オーバーレイの Inspector UI — Issue #4
 
-### Next Steps (並行)
+### Next (並行)
 - [ ] gtool-rs の CF standard_name 対応改善 — Issue #6
 
 ## Architecture
@@ -100,9 +71,9 @@ geoscope/
 ├── PROGRESS.md               # このファイル
 └── src/
     ├── main.rs               # エントリポイント (D&D有効, 1280x800)
-    ├── app.rs                # GeoScopeApp (egui_dock 3カラム, D&D, GPU統合)
+    ├── app.rs                # GeoScopeApp (ダークテーマ, egui_dock 3カラム, D&D, GPU統合)
     ├── data/mod.rs           # DataStore, NetCDF読み込み, 変数推論
-    ├── renderer/mod.rs       # GlobeRenderer (wgpu, UV sphere, WGSL shader)
+    ├── renderer/mod.rs       # GlobeRenderer (wgpu, UV sphere, WGSL shader, 経緯線)
     └── ui/mod.rs             # TabViewer (DataBrowser, Viewport, Inspector)
 ```
 
