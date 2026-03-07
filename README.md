@@ -47,16 +47,31 @@ Drop a NetCDF file, instantly see your data on a 3D globe. Rotate, explore, and 
 
 ## Screenshots (Mockups)
 
-> Design mockups created in Pencil. Implementation has not started yet.
+> Design mockups created in [Pencil](https://pencil.evolves.dev). Implementation has not started yet.
 
-### L2 Explorer — Full Panel Layout
-Data Browser + 3D Globe + Inspector + view tabs
+### L0 Welcome — Drop a file, start exploring
+<p align="center"><img src="docs/screenshots/l0-welcome.png" width="720" alt="Welcome screen with file drop zone"></p>
 
-### A6 Copilot Chat — LLM-Powered Assistance
-Ask about visualizations, get physical explanations and action suggestions
+### L1 Basic View — Instant globe rendering
+<p align="center"><img src="docs/screenshots/l1-basic.png" width="720" alt="Globe view with sidebar and time slider"></p>
 
-### A7 Command Palette — Natural Language Commands
-Type natural language, see ranked suggestions with Rhai code preview
+### L2 Explorer — Full panel layout
+<p align="center"><img src="docs/screenshots/l2-explorer.png" width="720" alt="Data Browser + Globe + Inspector"></p>
+
+### L3 Code Mode — GUI actions become code
+<p align="center"><img src="docs/screenshots/l3-code.png" width="720" alt="Code editor with auto-generated Python/Rhai"></p>
+
+### LLM Copilot Chat — Ask about your data
+<p align="center"><img src="docs/screenshots/a6-copilot-chat.png" width="720" alt="Chat panel with physical explanation and action suggestions"></p>
+
+### Command Palette — Natural language commands
+<p align="center"><img src="docs/screenshots/a7-command-palette.png" width="720" alt="Cmd+K palette with ranked suggestions and Rhai code preview"></p>
+
+### Hovmoller Diagram
+<p align="center"><img src="docs/screenshots/a2-hovmoller.png" width="720" alt="Time-longitude Hovmoller diagram"></p>
+
+### Energy Spectrum E(n)
+<p align="center"><img src="docs/screenshots/a3-spectrum.png" width="720" alt="Log-log energy spectrum plot"></p>
 
 ## Tech Stack
 
