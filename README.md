@@ -1,8 +1,8 @@
 # GeoScope
 
-**Open. See. Explore.**
+**Open. See. Explore.** — Smart & Interactive.
 
-GFD (Geophysical Fluid Dynamics) data visualization desktop application — a modern replacement for GrADS/Panoply with LLM-powered assistance.
+A next-generation GFD (Geophysical Fluid Dynamics) data visualization desktop app. Drop a NetCDF, get an instant 3D globe, and let an LLM Copilot explain the physics. A modern replacement for GrADS/Panoply.
 
 <p align="center"><img src="docs/screenshots/a6-copilot-chat.png" width="800" alt="GeoScope with LLM Copilot — ask about your data, get physical explanations"></p>
 
