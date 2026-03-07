@@ -148,8 +148,8 @@ pub fn interpolate_lut(stops: &[(f32, [u8; 3]); 5]) -> Vec<u8> {
     data
 }
 
-/// CPU-side colormap: map a value in [min, max] to RGBA using the given colormap.
-pub fn colormap_rgba(value: f32, min: f32, max: f32, colormap: Colormap) -> [u8; 4] {
+/// CPU-side colormap: map a value in [min, max] to RGBA using a pre-generated LUT.
+pub fn colormap_rgba_with_lut(value: f32, min: f32, max: f32, lut: &[u8]) -> [u8; 4] {
     let range = max - min;
     let normalized = if range.abs() < 1e-10 {
         0.5
@@ -157,14 +157,16 @@ pub fn colormap_rgba(value: f32, min: f32, max: f32, colormap: Colormap) -> [u8;
         ((value - min) / range).clamp(0.0, 1.0)
     };
 
-    let lut = match colormap {
-        Colormap::Viridis => generate_viridis_lut(),
-        Colormap::RdBuR => generate_rdbu_r_lut(),
-    };
-
     let idx = (normalized * 255.0) as usize;
     let base = idx * 4;
     [lut[base], lut[base + 1], lut[base + 2], lut[base + 3]]
+}
+
+/// CPU-side colormap: map a value in [min, max] to RGBA using the given colormap.
+/// Note: generates the LUT on each call — use `colormap_rgba_with_lut` for bulk operations.
+pub fn colormap_rgba(value: f32, min: f32, max: f32, colormap: Colormap) -> [u8; 4] {
+    let lut = colormap_lut(colormap);
+    colormap_rgba_with_lut(value, min, max, &lut)
 }
 
 /// Generate a colormap LUT for the given colormap selection.

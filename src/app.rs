@@ -27,6 +27,7 @@ pub struct GeoScopeApp {
     data_generation: u64,
     gpu_generation: u64,
     last_colormap: crate::ui::Colormap,
+    hovmoller_generation: u64,
     theme_applied: bool,
 }
 
@@ -52,6 +53,7 @@ impl GeoScopeApp {
             data_generation: 0,
             gpu_generation: 0,
             last_colormap: crate::ui::Colormap::default(),
+            hovmoller_generation: 0,
             theme_applied: false,
         }
     }
@@ -304,7 +306,6 @@ impl eframe::App for GeoScopeApp {
                     );
                     self.gpu_generation = self.data_generation;
 
-                    // Update Hovmoller data (equator latitude = height/2)
                     if let Some(file_idx) = self.data_store.active_file {
                         if let Some(file) = self.data_store.files.get(file_idx) {
                             if let Some(var_idx) = file.selected_variable {
@@ -313,16 +314,33 @@ impl eframe::App for GeoScopeApp {
                                     "{}: {}x{}, range [{:.4e}, {:.4e}]",
                                     var.name, field.width, field.height, field.min, field.max,
                                 );
-
-                                let lat_idx = field.height / 2; // equator
-                                if let Ok(hov_data) = self.data_store.load_hovmoller_data(file_idx, var_idx, lat_idx) {
-                                    self.hovmoller_renderer.set_data(&hov_data, self.ui_state.colormap);
-                                }
                             }
                         }
                     }
                 }
             }
+        }
+
+        // Lazy Hovmoller data loading — only when view is active and data has changed
+        if self.ui_state.view_mode == crate::ui::ViewMode::Hovmoller
+            && self.hovmoller_generation != self.data_generation
+        {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let Some(file) = self.data_store.files.get(file_idx) {
+                    if let Some(var_idx) = file.selected_variable {
+                        if let Some(ref field) = file.field_data {
+                            let lat_idx = field.height / 2;
+                            if let Ok(hov_data) =
+                                self.data_store.load_hovmoller_data(file_idx, var_idx, lat_idx)
+                            {
+                                self.hovmoller_renderer
+                                    .set_data(&hov_data, self.ui_state.colormap);
+                            }
+                        }
+                    }
+                }
+            }
+            self.hovmoller_generation = self.data_generation;
         }
     }
 }

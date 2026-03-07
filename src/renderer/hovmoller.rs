@@ -1,6 +1,6 @@
 // renderer/hovmoller.rs — Hovmoller diagram (time x longitude) using egui 2D drawing
 
-use crate::renderer::common::colormap_rgba;
+use crate::renderer::common::{colormap_lut, colormap_rgba_with_lut};
 use crate::ui::Colormap;
 
 /// Row-major [time][lon] data for a Hovmoller diagram.
@@ -35,12 +35,13 @@ impl HovmollerRenderer {
     pub fn set_data(&mut self, data: &HovmollerData, colormap: Colormap) {
         let w = data.n_lon;
         let h = data.n_time;
+        let lut = colormap_lut(colormap);
         let mut pixels = Vec::with_capacity(w * h * 4);
 
         for t in 0..h {
             for x in 0..w {
                 let val = data.values[t * w + x];
-                let [r, g, b, a] = colormap_rgba(val, data.min, data.max, colormap);
+                let [r, g, b, a] = colormap_rgba_with_lut(val, data.min, data.max, &lut);
                 pixels.extend_from_slice(&[r, g, b, a]);
             }
         }
