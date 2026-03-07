@@ -1,0 +1,2 @@
+[env]
+HDF5_DIR = "/opt/homebrew/opt/hdf5@1.10"
