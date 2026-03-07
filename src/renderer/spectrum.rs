@@ -23,6 +23,10 @@ impl SpectrumRenderer {
 
     /// Draw the log-log E(n) spectrum plot.
     pub fn paint(&mut self, ui: &mut egui::Ui) {
+        // Stylish background
+        let bg_rect = ui.available_rect_before_wrap();
+        super::globe::paint_viewport_background(ui.painter(), bg_rect);
+
         let Some(data) = &self.data else {
             ui.centered_and_justified(|ui| {
                 ui.label("No spectral data available");

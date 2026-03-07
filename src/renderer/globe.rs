@@ -552,16 +552,19 @@ impl GlobeRenderer {
 
     pub fn paint(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
-        // Add horizontal padding so the globe doesn't touch the edges
-        let padding = (available.x * 0.05).max(8.0);
-        let padded_size = egui::vec2(available.x - padding * 2.0, available.y);
+        // Add padding so the globe doesn't touch the edges
+        let pad_x = (available.x * 0.05).max(8.0);
+        let pad_y = (available.y * 0.05).max(8.0);
+        let padded_size = egui::vec2(available.x - pad_x * 2.0, available.y - pad_y * 2.0);
         let (full_rect, _) = ui.allocate_exact_size(available, egui::Sense::hover());
         let rect = egui::Rect::from_center_size(full_rect.center(), padded_size);
+
+        // Stylish background — radial vignette from deep blue center to dark edges
+        paint_viewport_background(ui.painter(), full_rect);
+
         let response = ui.interact(rect, ui.id().with("globe_interact"), egui::Sense::click_and_drag());
 
         if !self.initialized {
-            ui.painter()
-                .rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 25, 35));
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
@@ -605,6 +608,70 @@ impl GlobeRenderer {
         );
         ui.painter().add(callback);
     }
+}
+
+// ---------------------------------------------------------------------------
+// Viewport background — radial vignette with subtle star-field feel
+// ---------------------------------------------------------------------------
+
+/// Paint a stylish dark background with radial vignette gradient.
+/// Center: deep blue-black, edges: darker. Creates a space-like feel.
+pub fn paint_viewport_background(painter: &egui::Painter, rect: egui::Rect) {
+    // Base fill — very dark blue-black
+    painter.rect_filled(rect, 0.0, egui::Color32::from_rgb(12, 14, 22));
+
+    // Radial vignette via concentric oval mesh
+    let center = rect.center();
+    let rx = rect.width() * 0.5;
+    let ry = rect.height() * 0.5;
+
+    let mut mesh = egui::Mesh::default();
+    let n_rings = 5;
+    let n_segments = 32;
+
+    // Center vertex — slightly lighter
+    mesh.colored_vertex(center, egui::Color32::from_rgb(22, 24, 38));
+
+    for ring in 1..=n_rings {
+        let t = ring as f32 / n_rings as f32;
+        // Exponential falloff for smoother vignette
+        let brightness = (1.0 - t * t).max(0.0);
+        let r = (12.0 + brightness * 10.0) as u8;
+        let g = (14.0 + brightness * 10.0) as u8;
+        let b = (22.0 + brightness * 16.0) as u8;
+        let color = egui::Color32::from_rgb(r, g, b);
+
+        for seg in 0..n_segments {
+            let angle = seg as f32 / n_segments as f32 * std::f32::consts::TAU;
+            let x = center.x + angle.cos() * rx * t;
+            let y = center.y + angle.sin() * ry * t;
+            mesh.colored_vertex(egui::pos2(x, y), color);
+        }
+    }
+
+    // Triangles: center to first ring
+    for seg in 0..n_segments {
+        let next = (seg + 1) % n_segments;
+        mesh.add_triangle(0, 1 + seg as u32, 1 + next as u32);
+    }
+
+    // Triangles: ring to ring
+    for ring in 0..(n_rings - 1) {
+        let base_inner = 1 + ring as u32 * n_segments as u32;
+        let base_outer = base_inner + n_segments as u32;
+        for seg in 0..n_segments {
+            let next = (seg + 1) % n_segments;
+            let i0 = base_inner + seg as u32;
+            let i1 = base_inner + next as u32;
+            let o0 = base_outer + seg as u32;
+            let o1 = base_outer + next as u32;
+            mesh.add_triangle(i0, o0, i1);
+            mesh.add_triangle(i1, o0, o1);
+        }
+    }
+
+    // Clip to rect
+    painter.with_clip_rect(rect).add(egui::Shape::mesh(mesh));
 }
 
 // ---------------------------------------------------------------------------
@@ -721,8 +788,20 @@ fn sample_bilinear(uv: vec2<f32>) -> f32 {
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let nz = in.view_normal.z;
-    if nz <= 0.0 {
+
+    // Atmospheric glow halo — render even on backface with nz in [-0.08, 0]
+    if nz <= -0.08 {
         discard;
+    }
+
+    // Atmosphere glow color (teal-ish, matching the app primary)
+    let atmo_color = vec3<f32>(0.0, 0.45, 0.42);
+
+    // Backface halo zone: nz in [-0.08, 0] → pure atmospheric glow fading out
+    if nz <= 0.0 {
+        let halo_t = smoothstep(-0.08, 0.0, nz);
+        let glow_alpha = halo_t * 0.25;
+        return vec4<f32>(atmo_color * 0.6, glow_alpha);
     }
 
     var data_val: f32;
@@ -741,6 +820,12 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     var color = cmap_color.rgb * limb;
 
+    // Atmospheric rim light — subtle glow near the limb
+    let rim = 1.0 - nz;
+    let rim_intensity = pow(rim, 3.0) * 0.4;
+    color = mix(color, atmo_color, rim_intensity);
+
+    // Graticule lines
     let lon_deg = in.uv.x * 360.0;
     let lat_deg = in.uv.y * 180.0;
     let grid_lon = abs(lon_deg % 30.0);

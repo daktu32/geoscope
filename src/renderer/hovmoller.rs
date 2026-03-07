@@ -55,6 +55,10 @@ impl HovmollerRenderer {
 
     /// Draw the Hovmoller diagram filling the available space with axis labels.
     pub fn paint(&mut self, ui: &mut egui::Ui) {
+        // Stylish background
+        let bg_rect = ui.available_rect_before_wrap();
+        super::globe::paint_viewport_background(ui.painter(), bg_rect);
+
         // Lazily create texture from pending image
         if let Some(image) = self.pending_image.take() {
             self.texture = Some(ui.ctx().load_texture(

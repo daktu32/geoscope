@@ -560,9 +560,10 @@ impl MapRenderer {
             egui::Sense::click_and_drag(),
         );
 
+        // Stylish background
+        super::globe::paint_viewport_background(ui.painter(), rect);
+
         if !self.initialized {
-            ui.painter()
-                .rect_filled(rect, 0.0, egui::Color32::from_rgb(20, 25, 35));
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
