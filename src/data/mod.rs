@@ -96,6 +96,13 @@ pub struct VectorFieldData {
     pub max_magnitude: f32,
 }
 
+/// Trajectory data: a sequence of (lon, lat) points indexed by time.
+#[derive(Debug, Clone)]
+pub struct TrajectoryData {
+    pub points: Vec<(f32, f32)>, // (lon_deg, lat_deg) time-indexed
+    pub name: String,
+}
+
 /// Central data store for the application.
 #[derive(Debug, Default)]
 pub struct DataStore {
@@ -698,6 +705,48 @@ impl DataStore {
             min,
             max,
         }
+    }
+
+    /// Load trajectory data from two 1D variables (lon and lat).
+    pub fn load_trajectory_data(
+        &self,
+        file_idx: usize,
+        lon_var_idx: usize,
+        lat_var_idx: usize,
+    ) -> Result<TrajectoryData, String> {
+        let file_entry = &self.files[file_idx];
+        let lon_info = &file_entry.variables[lon_var_idx];
+        let lat_info = &file_entry.variables[lat_var_idx];
+
+        let file = netcdf::open(&file_entry.path)
+            .map_err(|e| format!("Failed to reopen file: {e}"))?;
+
+        let lon_var = file
+            .variable(&lon_info.name)
+            .ok_or_else(|| format!("Variable '{}' not found", lon_info.name))?;
+        let lat_var = file
+            .variable(&lat_info.name)
+            .ok_or_else(|| format!("Variable '{}' not found", lat_info.name))?;
+
+        let lon_vals: Vec<f64> = lon_var
+            .get_values(..)
+            .map_err(|e| format!("Failed to read lon data: {e}"))?;
+        let lat_vals: Vec<f64> = lat_var
+            .get_values(..)
+            .map_err(|e| format!("Failed to read lat data: {e}"))?;
+
+        if lon_vals.len() != lat_vals.len() {
+            return Err("lon and lat variables have different lengths".to_string());
+        }
+
+        let points: Vec<(f32, f32)> = lon_vals
+            .iter()
+            .zip(lat_vals.iter())
+            .map(|(&lo, &la)| (lo as f32, la as f32))
+            .collect();
+
+        let name = format!("{}/{}", lon_info.name, lat_info.name);
+        Ok(TrajectoryData { points, name })
     }
 
     pub fn active_field(&self) -> Option<&FieldData> {

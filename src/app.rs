@@ -12,6 +12,7 @@ use crate::renderer::spectrum::SpectrumRenderer;
 use crate::renderer::contour::ContourOverlay;
 use crate::renderer::profile::ProfileRenderer;
 use crate::renderer::streamline::StreamlineOverlay;
+use crate::renderer::trajectory::TrajectoryOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
 use crate::ui::{Colormap, GeoScopeTabViewer, Tab};
 
@@ -62,6 +63,7 @@ pub struct GeoScopeApp {
     profile_renderer: ProfileRenderer,
     contour_overlay: ContourOverlay,
     streamline_overlay: StreamlineOverlay,
+    trajectory_overlay: TrajectoryOverlay,
     ui_state: crate::ui::UiState,
     data_generation: u64,
     gpu_generation: u64,
@@ -72,6 +74,7 @@ pub struct GeoScopeApp {
     profile_generation: u64,
     contour_generation: u64,
     streamline_generation: u64,
+    trajectory_generation: u64,
     last_map_projection: crate::renderer::map::MapProjection,
     /// Pending file open requests from UI.
     open_file_request: Vec<std::path::PathBuf>,
@@ -93,7 +96,7 @@ impl GeoScopeApp {
         let mut dock_state = DockState::new(vec![Tab::Viewport]);
         let surface = dock_state.main_surface_mut();
         surface.split_left(NodeIndex::root(), 0.15, vec![Tab::DataBrowser]);
-        surface.split_right(NodeIndex::root(), 0.80, vec![Tab::Inspector]);
+        surface.split_right(NodeIndex::root(), 0.80, vec![Tab::Inspector, Tab::CodePanel]);
 
         Self {
             dock_state,
@@ -107,6 +110,7 @@ impl GeoScopeApp {
             profile_renderer: ProfileRenderer::new(),
             contour_overlay: ContourOverlay::new(),
             streamline_overlay: StreamlineOverlay::new(),
+            trajectory_overlay: TrajectoryOverlay::new(),
             ui_state: crate::ui::UiState::default(),
             data_generation: 0,
             gpu_generation: 0,
@@ -117,6 +121,7 @@ impl GeoScopeApp {
             profile_generation: 0,
             contour_generation: 0,
             streamline_generation: 0,
+            trajectory_generation: 0,
             last_map_projection: crate::renderer::map::MapProjection::default(),
             open_file_request: Vec::new(),
             global_range_cache: None,
@@ -312,6 +317,7 @@ impl eframe::App for GeoScopeApp {
             profile_renderer: &mut self.profile_renderer,
             contour_overlay: &mut self.contour_overlay,
             streamline_overlay: &mut self.streamline_overlay,
+            trajectory_overlay: &mut self.trajectory_overlay,
             ui_state: &mut self.ui_state,
             data_generation: &mut self.data_generation,
             open_file_request: &mut self.open_file_request,
@@ -798,6 +804,33 @@ impl eframe::App for GeoScopeApp {
             self.streamline_generation = self.data_generation;
         } else if !self.ui_state.streamline_enabled && self.streamline_overlay.has_data() {
             self.streamline_overlay.clear();
+        }
+
+        // Trajectory overlay data loading
+        if self.ui_state.trajectory_enabled
+            && self.trajectory_generation != self.data_generation
+        {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let (Some(lon_idx), Some(lat_idx)) = (
+                    self.ui_state.trajectory_lon_var,
+                    self.ui_state.trajectory_lat_var,
+                ) {
+                    if let Ok(traj_data) =
+                        self.data_store.load_trajectory_data(file_idx, lon_idx, lat_idx)
+                    {
+                        self.trajectory_overlay.set_data(traj_data);
+                    }
+                }
+            }
+            self.trajectory_generation = self.data_generation;
+        } else if !self.ui_state.trajectory_enabled && self.trajectory_overlay.has_data() {
+            self.trajectory_overlay.clear();
+        }
+
+        // Sync trajectory time
+        if self.ui_state.trajectory_enabled {
+            self.trajectory_overlay.set_current_time(self.ui_state.time_index);
+            self.trajectory_overlay.set_trail_length(self.ui_state.trajectory_trail_length);
         }
     }
 }

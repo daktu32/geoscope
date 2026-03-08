@@ -1,4 +1,5 @@
 mod app;
+mod codegen;
 mod data;
 mod renderer;
 mod ui;

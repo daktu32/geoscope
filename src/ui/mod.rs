@@ -10,6 +10,7 @@ use crate::renderer::spectrum::SpectrumRenderer;
 use crate::renderer::contour::ContourOverlay;
 use crate::renderer::profile::ProfileRenderer;
 use crate::renderer::streamline::StreamlineOverlay;
+use crate::renderer::trajectory::TrajectoryOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
 
 /// View mode for the viewport.
@@ -145,6 +146,14 @@ pub struct UiState {
     pub contour_levels: usize,
     // Streamline overlay
     pub streamline_enabled: bool,
+    // Trajectory overlay
+    pub trajectory_enabled: bool,
+    pub trajectory_lon_var: Option<usize>,
+    pub trajectory_lat_var: Option<usize>,
+    pub trajectory_trail_length: usize,
+    // Visualization suggestion
+    pub suggestion: Option<crate::data::inference::VisualizationSuggestion>,
+    pub suggestion_dismissed: bool,
 }
 
 /// Range mode for colormap scaling.
@@ -192,6 +201,12 @@ impl Default for UiState {
             contour_enabled: false,
             contour_levels: 10,
             streamline_enabled: false,
+            trajectory_enabled: false,
+            trajectory_lon_var: None,
+            trajectory_lat_var: None,
+            trajectory_trail_length: 50,
+            suggestion: None,
+            suggestion_dismissed: false,
         }
     }
 }
@@ -202,6 +217,7 @@ pub enum Tab {
     DataBrowser,
     Viewport,
     Inspector,
+    CodePanel,
 }
 
 /// Tab viewer that renders each panel.
@@ -216,6 +232,7 @@ pub struct GeoScopeTabViewer<'a> {
     pub profile_renderer: &'a mut ProfileRenderer,
     pub contour_overlay: &'a mut ContourOverlay,
     pub streamline_overlay: &'a mut StreamlineOverlay,
+    pub trajectory_overlay: &'a mut TrajectoryOverlay,
     pub ui_state: &'a mut UiState,
     /// Incremented when field data changes, triggers GPU upload.
     pub data_generation: &'a mut u64,
@@ -233,6 +250,7 @@ impl TabViewer for GeoScopeTabViewer<'_> {
             Tab::DataBrowser => "Data".into(),
             Tab::Viewport => "Globe".into(),
             Tab::Inspector => "Inspector".into(),
+            Tab::CodePanel => "Code".into(),
         }
     }
 
@@ -241,6 +259,7 @@ impl TabViewer for GeoScopeTabViewer<'_> {
             Tab::DataBrowser => self.data_browser_ui(ui),
             Tab::Viewport => self.viewport_ui(ui),
             Tab::Inspector => self.inspector_ui(ui),
+            Tab::CodePanel => self.code_panel_ui(ui),
         }
     }
 }
@@ -378,6 +397,7 @@ impl GeoScopeTabViewer<'_> {
             self.data_store.active_file = Some(file_idx);
             if self.data_store.load_field(file_idx, var_idx).is_ok() {
                 *self.data_generation += 1;
+                self.ui_state.suggestion_dismissed = false;
             }
         }
 
@@ -497,6 +517,10 @@ impl GeoScopeTabViewer<'_> {
             // V: toggle vector/streamline
             if i.key_pressed(egui::Key::V) {
                 self.ui_state.streamline_enabled = !self.ui_state.streamline_enabled;
+            }
+            // T: toggle trajectory
+            if i.key_pressed(egui::Key::T) {
+                self.ui_state.trajectory_enabled = !self.ui_state.trajectory_enabled;
             }
         });
 
@@ -696,6 +720,20 @@ impl GeoScopeTabViewer<'_> {
                         self.globe_renderer.zoom,
                     );
                 }
+                if self.ui_state.trajectory_enabled {
+                    let (view, view_proj) = crate::renderer::common::build_view_proj(
+                        self.globe_renderer.cam_lon,
+                        self.globe_renderer.cam_lat,
+                        self.globe_renderer.zoom,
+                        globe_rect,
+                    );
+                    self.trajectory_overlay.paint_on_globe(
+                        child_ui.painter(),
+                        globe_rect,
+                        &view,
+                        &view_proj,
+                    );
+                }
                 self.ui_state.hover_info = None;
             }
             ViewMode::Map => {
@@ -720,6 +758,15 @@ impl GeoScopeTabViewer<'_> {
                 }
                 if self.ui_state.streamline_enabled {
                     self.streamline_overlay.paint_on_map(
+                        child_ui.painter(),
+                        central,
+                        self.map_renderer.pan_x,
+                        self.map_renderer.pan_y,
+                        self.map_renderer.zoom,
+                    );
+                }
+                if self.ui_state.trajectory_enabled {
+                    self.trajectory_overlay.paint_on_map(
                         child_ui.painter(),
                         central,
                         self.map_renderer.pan_x,
@@ -1223,6 +1270,117 @@ impl GeoScopeTabViewer<'_> {
                         ui.add_space(6.0);
                     }
 
+                    // Trajectory overlay (Globe/Map views)
+                    if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
+                        Self::section_header(ui, "Trajectory");
+                        ui.add_space(3.0);
+                        ui.checkbox(&mut self.ui_state.trajectory_enabled, egui::RichText::new("Enabled").size(11.0));
+
+                        if self.ui_state.trajectory_enabled {
+                            // Auto-detect trajectory pair on first enable
+                            if self.ui_state.trajectory_lon_var.is_none() {
+                                if let Some((lon_idx, lat_idx)) = crate::data::inference::detect_trajectory_pair(&file.variables) {
+                                    self.ui_state.trajectory_lon_var = Some(lon_idx);
+                                    self.ui_state.trajectory_lat_var = Some(lat_idx);
+                                    *self.data_generation += 1;
+                                }
+                            }
+
+                            if self.ui_state.trajectory_lon_var.is_some() {
+                                let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("lon:").size(10.0));
+                                    let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
+                                    let mut lon_idx = self.ui_state.trajectory_lon_var.unwrap_or(0);
+                                    egui::ComboBox::from_id_salt("traj_lon_combo")
+                                        .selected_text(var_names.get(lon_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                        .width(combo_w)
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in var_names.iter().enumerate() {
+                                                ui.selectable_value(&mut lon_idx, i, name);
+                                            }
+                                        });
+                                    self.ui_state.trajectory_lon_var = Some(lon_idx);
+                                });
+                                ui.horizontal(|ui| {
+                                    ui.label(egui::RichText::new("lat:").size(10.0));
+                                    let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
+                                    let mut lat_idx = self.ui_state.trajectory_lat_var.unwrap_or(0);
+                                    egui::ComboBox::from_id_salt("traj_lat_combo")
+                                        .selected_text(var_names.get(lat_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                        .width(combo_w)
+                                        .show_ui(ui, |ui| {
+                                            for (i, name) in var_names.iter().enumerate() {
+                                                ui.selectable_value(&mut lat_idx, i, name);
+                                            }
+                                        });
+                                    self.ui_state.trajectory_lat_var = Some(lat_idx);
+                                });
+
+                                let mut trail = self.ui_state.trajectory_trail_length;
+                                if ui.add(egui::Slider::new(&mut trail, 10..=200).text("Trail")).changed() {
+                                    self.ui_state.trajectory_trail_length = trail;
+                                }
+                            } else {
+                                ui.label(egui::RichText::new("No trajectory pair detected").size(10.0).color(crate::app::TEXT_CAPTION));
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                    }
+
+                    // --- Suggestion ---
+                    {
+                        let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
+                        let suggestion = crate::data::inference::suggest_visualization(var, &inference, &file.variables);
+                        if !self.ui_state.suggestion_dismissed {
+                            Self::section_header(ui, "Suggested");
+                            ui.add_space(2.0);
+                            ui.label(egui::RichText::new(&suggestion.description).size(10.0));
+
+                            ui.horizontal(|ui| {
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("Apply").size(10.0).color(egui::Color32::WHITE)
+                                ).fill(crate::app::PRIMARY).corner_radius(3.0)).clicked() {
+                                    // Apply suggestion
+                                    match suggestion.view_mode.as_str() {
+                                        "Globe" => self.ui_state.view_mode = ViewMode::Globe,
+                                        "Map" => self.ui_state.view_mode = ViewMode::Map,
+                                        "Profile" => self.ui_state.view_mode = ViewMode::Profile,
+                                        _ => {}
+                                    }
+                                    match suggestion.colormap.as_str() {
+                                        "RdBu_r" => self.ui_state.colormap = Colormap::RdBuR,
+                                        "Viridis" => self.ui_state.colormap = Colormap::Viridis,
+                                        _ => {}
+                                    }
+                                    if suggestion.symmetric {
+                                        if let Some(ref field) = file.field_data {
+                                            let abs_max = field.min.abs().max(field.max.abs());
+                                            self.ui_state.range_mode = RangeMode::Manual;
+                                            self.ui_state.manual_min = -abs_max;
+                                            self.ui_state.manual_max = abs_max;
+                                        }
+                                    }
+                                    self.ui_state.contour_enabled = suggestion.overlays.contains(&"contours".to_string());
+                                    self.ui_state.streamline_enabled = suggestion.overlays.contains(&"streamlines".to_string());
+                                    if suggestion.overlays.contains(&"trajectory".to_string()) {
+                                        self.ui_state.trajectory_enabled = true;
+                                    }
+                                    *self.data_generation += 1;
+                                }
+                                if ui.button(egui::RichText::new("×").size(11.0)).clicked() {
+                                    self.ui_state.suggestion_dismissed = true;
+                                }
+                            });
+
+                            ui.add_space(6.0);
+                            ui.separator();
+                            ui.add_space(6.0);
+                        }
+                    }
+
                     // --- Inference ---
                     let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
                     Self::section_header(ui, "Inference");
@@ -1266,8 +1424,38 @@ impl GeoScopeTabViewer<'_> {
         if let Some((fi, vi)) = inspector_load_request {
             if self.data_store.load_field(fi, vi).is_ok() {
                 *self.data_generation += 1;
+                self.ui_state.suggestion_dismissed = false;
             }
         }
+    }
+
+    fn code_panel_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Code").strong().size(13.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(egui::RichText::new("Copy").size(11.0)).clicked() {
+                    let code = crate::codegen::python::generate_python(self.ui_state, self.data_store);
+                    ui.ctx().copy_text(code);
+                    self.ui_state.status_text = "Code copied to clipboard".to_string();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
+        ui.add_space(4.0);
+
+        let code = crate::codegen::python::generate_python(self.ui_state, self.data_store);
+
+        egui::ScrollArea::vertical().show(ui, |ui| {
+            let mut code_display = code;
+            ui.add(
+                egui::TextEdit::multiline(&mut code_display)
+                    .code_editor()
+                    .desired_width(f32::INFINITY)
+                    .interactive(false),
+            );
+        });
     }
 
     /// Returns the length of the time dimension for the active variable, if any.

@@ -270,6 +270,169 @@ pub fn detect_wind_pair(variables: &[VariableInfo]) -> Option<(usize, usize)> {
     None
 }
 
+/// Visualization suggestion — recommended view settings for a variable.
+#[derive(Debug, Clone)]
+pub struct VisualizationSuggestion {
+    pub view_mode: String,
+    pub colormap: String,
+    pub overlays: Vec<String>,
+    pub symmetric: bool,
+    pub description: String,
+}
+
+/// Suggest visualization settings based on variable metadata and available variables.
+pub fn suggest_visualization(
+    var: &VariableInfo,
+    inference: &InferenceResult,
+    variables: &[VariableInfo],
+) -> VisualizationSuggestion {
+    let has_time = var.dimensions.iter().any(|(n, _)| {
+        let l = n.to_ascii_lowercase();
+        l == "time" || l == "t"
+    });
+    let spatial_dims = var.dimensions.iter().filter(|(n, _)| {
+        let l = n.to_ascii_lowercase();
+        !["time", "t"].contains(&l.as_str())
+    }).count();
+
+    // Determine view mode
+    let view_mode = if has_time && spatial_dims >= 2 {
+        "Globe".to_string()
+    } else if spatial_dims >= 2 {
+        "Map".to_string()
+    } else {
+        "Profile".to_string()
+    };
+
+    // Determine colormap
+    let colormap = match inference.suggested_colormap {
+        ColormapHint::Diverging => "RdBu_r".to_string(),
+        ColormapHint::Sequential => "Viridis".to_string(),
+    };
+
+    let symmetric = inference.suggested_colormap == ColormapHint::Diverging;
+
+    // Determine overlays
+    let mut overlays = Vec::new();
+
+    match inference.category {
+        VariableCategory::Divergence
+        | VariableCategory::Vorticity
+        | VariableCategory::Geopotential
+        | VariableCategory::Pressure
+        | VariableCategory::Temperature => {
+            overlays.push("contours".to_string());
+        }
+        _ => {}
+    }
+
+    // Check for wind pair → suggest streamlines
+    if detect_wind_pair(variables).is_some() {
+        match inference.category {
+            VariableCategory::WindSpeed | VariableCategory::Vorticity | VariableCategory::Divergence => {
+                overlays.push("streamlines".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // Check for trajectory pair
+    if detect_trajectory_pair(variables).is_some() {
+        overlays.push("trajectory".to_string());
+    }
+
+    let overlay_desc = if overlays.is_empty() {
+        String::new()
+    } else {
+        format!(" + {}", overlays.join(", "))
+    };
+    let description = format!("{} + {}{}", view_mode, colormap, overlay_desc);
+
+    VisualizationSuggestion {
+        view_mode,
+        colormap,
+        overlays,
+        symmetric,
+        description,
+    }
+}
+
+/// Detect a trajectory lon/lat pair from the variable list.
+/// Returns (lon_var_idx, lat_var_idx) if found.
+///
+/// Conditions:
+/// - Variables are 1D (time dimension only, no spatial dims)
+/// - Name patterns: `*lon*` + `*lat*`, `*_x` + `*_y`
+/// - Both variables have the same dimension structure
+pub fn detect_trajectory_pair(variables: &[VariableInfo]) -> Option<(usize, usize)> {
+    let is_1d_time_only = |v: &VariableInfo| -> bool {
+        v.dimensions.len() == 1
+            && {
+                let name = v.dimensions[0].0.to_ascii_lowercase();
+                name == "time" || name == "t"
+            }
+    };
+
+    // Pattern 1: *lon* + *lat*
+    let lon_candidates: Vec<usize> = variables
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| {
+            is_1d_time_only(v) && {
+                let n = v.name.to_ascii_lowercase();
+                n.contains("lon") && !n.contains("longitude") || n == "longitude"
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    let lat_candidates: Vec<usize> = variables
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| {
+            is_1d_time_only(v) && {
+                let n = v.name.to_ascii_lowercase();
+                n.contains("lat") && !n.contains("latitude") || n == "latitude"
+            }
+        })
+        .map(|(i, _)| i)
+        .collect();
+
+    for &lon_idx in &lon_candidates {
+        for &lat_idx in &lat_candidates {
+            if variables[lon_idx].dimensions == variables[lat_idx].dimensions {
+                return Some((lon_idx, lat_idx));
+            }
+        }
+    }
+
+    // Pattern 2: *_x + *_y
+    for (i, v) in variables.iter().enumerate() {
+        if !is_1d_time_only(v) {
+            continue;
+        }
+        let name = &v.name;
+        if name.ends_with("_x") || name.ends_with("_lon") {
+            let base = if name.ends_with("_x") {
+                &name[..name.len() - 2]
+            } else {
+                &name[..name.len() - 4]
+            };
+            let y_suffix = if name.ends_with("_x") { "_y" } else { "_lat" };
+            let partner_name = format!("{}{}", base, y_suffix);
+            if let Some(j) = variables.iter().position(|v2| v2.name == partner_name) {
+                if is_1d_time_only(&variables[j])
+                    && variables[i].dimensions == variables[j].dimensions
+                {
+                    return Some((i, j));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

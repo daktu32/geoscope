@@ -10,6 +10,7 @@ pub mod map;
 pub mod profile;
 pub mod spectrum;
 pub mod streamline;
+pub mod trajectory;
 pub mod vector_overlay;
 
 pub use globe::GlobeRenderer;
