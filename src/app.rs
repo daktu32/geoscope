@@ -12,12 +12,39 @@ use crate::renderer::spectrum::SpectrumRenderer;
 use crate::renderer::vector_overlay::VectorOverlay;
 use crate::ui::{Colormap, GeoScopeTabViewer, Tab};
 
-const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0, 164, 154);
-const BG_DARK: egui::Color32 = egui::Color32::from_rgb(24, 24, 32);
-const BG_PANEL: egui::Color32 = egui::Color32::from_rgb(30, 30, 40);
-const BG_WIDGET: egui::Color32 = egui::Color32::from_rgb(42, 42, 55);
-const TEXT_PRIMARY: egui::Color32 = egui::Color32::from_rgb(220, 220, 230);
-const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(130, 130, 150);
+// ---------------------------------------------------------------------------
+// Design tokens — unified color system
+// ---------------------------------------------------------------------------
+
+// Accent
+pub(crate) const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0, 164, 154);
+
+// Backgrounds (darkest → lightest)
+pub(crate) const BG_DARK: egui::Color32 = egui::Color32::from_rgb(15, 15, 23);
+pub(crate) const BG_PANEL: egui::Color32 = egui::Color32::from_rgb(26, 26, 36);
+pub(crate) const BG_WIDGET: egui::Color32 = egui::Color32::from_rgb(37, 37, 48);
+pub(crate) const BG_HOVER: egui::Color32 = egui::Color32::from_rgb(54, 54, 76);
+
+// Text hierarchy
+pub(crate) const TEXT_HEADING: egui::Color32 = egui::Color32::from_rgb(245, 245, 250);
+pub(crate) const TEXT_BODY: egui::Color32 = egui::Color32::from_rgb(224, 224, 232);
+pub(crate) const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(156, 156, 176);
+pub(crate) const TEXT_CAPTION: egui::Color32 = egui::Color32::from_rgb(110, 110, 132);
+pub(crate) const TEXT_DISABLED: egui::Color32 = egui::Color32::from_rgb(74, 74, 94);
+
+// Semantic
+pub(crate) const ACCENT_ERROR: egui::Color32 = egui::Color32::from_rgb(255, 107, 107);
+pub(crate) const ACCENT_SUCCESS: egui::Color32 = egui::Color32::from_rgb(81, 207, 102);
+pub(crate) const ACCENT_MONO: egui::Color32 = egui::Color32::from_rgb(212, 165, 116);
+
+// Divider
+pub(crate) const DIVIDER: egui::Color32 = egui::Color32::from_rgb(45, 45, 58);
+
+// Spacing scale (4px grid)
+pub(crate) const SP_XS: f32 = 4.0;
+pub(crate) const SP_SM: f32 = 8.0;
+pub(crate) const SP_MD: f32 = 12.0;
+pub(crate) const SP_LG: f32 = 16.0;
 
 /// GeoScope application state.
 pub struct GeoScopeApp {
@@ -100,17 +127,17 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.faint_bg_color = BG_WIDGET;
 
     visuals.widgets.noninteractive.bg_fill = BG_PANEL;
-    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_DIM);
-    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgb(50, 50, 65));
+    visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_SECONDARY);
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, DIVIDER);
     visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(4);
 
     visuals.widgets.inactive.bg_fill = BG_WIDGET;
-    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
-    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 75));
+    visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_BODY);
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, DIVIDER);
     visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(4);
 
-    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(55, 55, 72);
-    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, egui::Color32::WHITE);
+    visuals.widgets.hovered.bg_fill = BG_HOVER;
+    visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_HEADING);
     visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, PRIMARY);
     visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(4);
 
@@ -119,47 +146,52 @@ fn apply_theme(ctx: &egui::Context) {
     visuals.widgets.active.corner_radius = egui::CornerRadius::same(4);
 
     visuals.widgets.open.bg_fill = BG_WIDGET;
-    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+    visuals.widgets.open.fg_stroke = egui::Stroke::new(1.0, TEXT_BODY);
     visuals.widgets.open.corner_radius = egui::CornerRadius::same(4);
 
-    visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(0, 164, 154, 60);
+    visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(0, 164, 154, 50);
     visuals.selection.stroke = egui::Stroke::new(1.0, PRIMARY);
 
-    visuals.window_shadow = egui::Shadow::NONE;
+    visuals.window_shadow = egui::Shadow {
+        offset: [0, 4],
+        blur: 12,
+        spread: 0,
+        color: egui::Color32::from_black_alpha(60),
+    };
     visuals.popup_shadow = egui::Shadow {
-        offset: [0, 2],
-        blur: 8,
+        offset: [0, 4],
+        blur: 12,
         spread: 0,
         color: egui::Color32::from_black_alpha(80),
     };
-    visuals.window_corner_radius = egui::CornerRadius::same(6);
+    visuals.window_corner_radius = egui::CornerRadius::same(8);
 
-    visuals.override_text_color = Some(TEXT_PRIMARY);
+    visuals.override_text_color = Some(TEXT_BODY);
     visuals.striped = true;
 
     ctx.set_visuals(visuals);
 
     let mut style = (*ctx.style()).clone();
-    style.spacing.item_spacing = egui::vec2(6.0, 4.0);
-    style.spacing.button_padding = egui::vec2(8.0, 3.0);
-    style.spacing.window_margin = egui::Margin::same(8);
+    style.spacing.item_spacing = egui::vec2(SP_SM, SP_XS);
+    style.spacing.button_padding = egui::vec2(SP_MD, 6.0);
+    style.spacing.window_margin = egui::Margin::same(SP_MD as i8);
     style.spacing.combo_width = 0.0;
 
     style.text_styles.insert(
+        egui::TextStyle::Heading,
+        egui::FontId::new(16.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
         egui::TextStyle::Body,
-        egui::FontId::new(13.0, egui::FontFamily::Proportional),
+        egui::FontId::new(12.0, egui::FontFamily::Proportional),
+    );
+    style.text_styles.insert(
+        egui::TextStyle::Button,
+        egui::FontId::new(12.0, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Small,
         egui::FontId::new(11.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Button,
-        egui::FontId::new(13.0, egui::FontFamily::Proportional),
-    );
-    style.text_styles.insert(
-        egui::TextStyle::Heading,
-        egui::FontId::new(16.0, egui::FontFamily::Proportional),
     );
     style.text_styles.insert(
         egui::TextStyle::Monospace,
@@ -182,7 +214,7 @@ fn dock_style(ctx: &egui::Context) -> egui_dock::Style {
     style.tab.active.outline_color = egui::Color32::TRANSPARENT;
 
     style.tab.inactive.bg_fill = BG_DARK;
-    style.tab.inactive.text_color = TEXT_DIM;
+    style.tab.inactive.text_color = TEXT_CAPTION;
     style.tab.inactive.outline_color = egui::Color32::TRANSPARENT;
 
     style.tab.focused.bg_fill = BG_PANEL;
@@ -281,34 +313,51 @@ impl eframe::App for GeoScopeApp {
                                 .file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            ui.label(egui::RichText::new("›").color(TEXT_DIM).size(14.0));
-                            ui.label(egui::RichText::new(name).size(13.0).color(TEXT_DIM));
+                            ui.label(egui::RichText::new("/").color(TEXT_CAPTION).size(14.0));
+                            ui.label(egui::RichText::new(name).size(12.0).color(TEXT_SECONDARY));
                         }
                     }
                 });
             });
 
-        // Status bar
+        // Status bar — show inference info or error/export status
         egui::TopBottomPanel::bottom("status_bar")
             .frame(egui::Frame::new().fill(BG_DARK).inner_margin(egui::Margin::symmetric(12, 2)))
             .exact_height(22.0)
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.label(
-                        egui::RichText::new(&tab_viewer.ui_state.status_text)
-                            .size(11.0)
-                            .color(TEXT_DIM),
-                    );
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let view_label = match tab_viewer.ui_state.view_mode {
-                            crate::ui::ViewMode::Globe => "Globe",
-                            crate::ui::ViewMode::Map => "Map",
-                            crate::ui::ViewMode::Hovmoller => "Hovmoller",
-                            crate::ui::ViewMode::Spectrum => "E(n)",
-                            crate::ui::ViewMode::CrossSection => "Section",
+                    // Check for error/export status first
+                    let is_special = tab_viewer.ui_state.status_text.starts_with("Error")
+                        || tab_viewer.ui_state.status_text.contains("error")
+                        || tab_viewer.ui_state.status_text.starts_with("Exported");
+
+                    if is_special {
+                        let status_color = if tab_viewer.ui_state.status_text.contains("rror") {
+                            ACCENT_ERROR
+                        } else {
+                            ACCENT_SUCCESS
                         };
-                        ui.label(egui::RichText::new(view_label).size(11.0).color(PRIMARY));
-                    });
+                        ui.label(egui::RichText::new(&tab_viewer.ui_state.status_text).size(11.0).color(status_color));
+                    } else {
+                        // Show inference-based status
+                        let inference_text = if let Some(fi) = tab_viewer.data_store.active_file {
+                            if let Some(file) = tab_viewer.data_store.files.get(fi) {
+                                if let Some(vi) = file.selected_variable {
+                                    let var = &file.variables[vi];
+                                    let inf = crate::data::inference::infer_variable(var, file.field_data.as_ref());
+                                    let cm = tab_viewer.ui_state.colormap;
+                                    Some(format!("Detected: {} ({}, {})", inf.description, cm.label(), cm.description()))
+                                } else { None }
+                            } else { None }
+                        } else { None };
+
+                        if let Some(text) = inference_text {
+                            ui.label(egui::RichText::new("💡").size(11.0));
+                            ui.label(egui::RichText::new(&text).size(11.0).color(TEXT_SECONDARY));
+                        } else {
+                            ui.label(egui::RichText::new(&tab_viewer.ui_state.status_text).size(11.0).color(TEXT_SECONDARY));
+                        }
+                    }
                 });
             });
 
@@ -371,7 +420,7 @@ impl eframe::App for GeoScopeApp {
 
                     // Preview colormap bar
                     let bar_w = ui.available_width() - 8.0;
-                    let bar_h = 10.0;
+                    let bar_h = 16.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
                     let lut = &self.lut_cache[&self.ui_state.colormap];
                     let painter = ui.painter();
@@ -401,7 +450,9 @@ impl eframe::App for GeoScopeApp {
                     ui.add_space(4.0);
 
                     // Export button
-                    if ui.button("Save...").clicked() {
+                    if ui.add(egui::Button::new(
+                        egui::RichText::new("Save PNG").color(egui::Color32::WHITE).size(12.0)
+                    ).fill(PRIMARY)).clicked() {
                         do_export = true;
                     }
                 });

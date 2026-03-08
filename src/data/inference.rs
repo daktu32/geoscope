@@ -27,6 +27,22 @@ pub enum VariableCategory {
     Generic,
 }
 
+impl VariableCategory {
+    /// Return dot color for Data Browser: red=diverging, green=scalar, orange=velocity
+    pub fn dot_color(&self) -> egui::Color32 {
+        match self {
+            Self::Vorticity | Self::Divergence | Self::StreamFunction | Self::VelocityPotential
+                => egui::Color32::from_rgb(235, 87, 87),   // red — diverging fields
+            Self::Geopotential | Self::Temperature | Self::Pressure | Self::Humidity | Self::SurfaceHeight
+                => egui::Color32::from_rgb(81, 207, 102),   // green — scalar fields
+            Self::WindSpeed
+                => egui::Color32::from_rgb(235, 173, 59),   // orange — velocity
+            Self::Generic
+                => egui::Color32::from_rgb(156, 156, 176),  // gray
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InferenceLevel {
     L1StandardName,
