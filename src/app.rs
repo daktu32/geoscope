@@ -35,6 +35,10 @@ pub struct GeoScopeApp {
     cross_section_generation: u64,
     vector_generation: u64,
     last_map_projection: crate::renderer::map::MapProjection,
+    /// Cached global (min, max) for the current variable. Reset on variable change.
+    global_range_cache: Option<(f32, f32)>,
+    /// Variable index used to compute the cached global range.
+    global_range_var: Option<(usize, usize)>,
     theme_applied: bool,
 }
 
@@ -66,6 +70,8 @@ impl GeoScopeApp {
             cross_section_generation: 0,
             vector_generation: 0,
             last_map_projection: crate::renderer::map::MapProjection::default(),
+            global_range_cache: None,
+            global_range_var: None,
             theme_applied: false,
         }
     }
@@ -302,22 +308,63 @@ impl eframe::App for GeoScopeApp {
 
         // Upload field data to GPU when it changes
         if self.data_generation != self.gpu_generation {
+            // Eagerly compute global range for the active variable (cached per variable)
+            if let Some(file_idx) = self.data_store.active_file {
+                if let Some(file) = self.data_store.files.get(file_idx) {
+                    if let Some(var_idx) = file.selected_variable {
+                        let key = (file_idx, var_idx);
+                        if self.global_range_var != Some(key) {
+                            if let Ok((gmin, gmax)) = self.data_store.compute_global_range(file_idx, var_idx) {
+                                self.global_range_cache = Some((gmin, gmax));
+                                self.global_range_var = Some(key);
+                                self.ui_state.global_range = Some((gmin, gmax));
+                            }
+                        }
+                    }
+                }
+            }
+
             if let Some(field) = self.data_store.active_field().cloned() {
                 if let Some(render_state) = frame.wgpu_render_state() {
-                    self.globe_renderer.upload_field_data(
+                    // Determine display range based on range mode
+                    let (display_min, display_max) = match self.ui_state.range_mode {
+                        crate::ui::RangeMode::Slice => {
+                            // Auto-scale from the current slice
+                            (field.min, field.max)
+                        }
+                        crate::ui::RangeMode::Global => {
+                            // Use cached global min/max
+                            self.global_range_cache.unwrap_or((field.min, field.max))
+                        }
+                        crate::ui::RangeMode::Manual => {
+                            let rmin = self.ui_state.manual_min;
+                            let rmax = self.ui_state.manual_max;
+                            if (rmax - rmin).abs() > f32::EPSILON {
+                                (rmin, rmax)
+                            } else {
+                                (field.min, field.max)
+                            }
+                        }
+                    };
+
+                    self.globe_renderer.upload_field_data_with_range(
                         render_state,
                         &field.values,
                         field.width,
                         field.height,
+                        display_min,
+                        display_max,
                         self.ui_state.colormap,
                         self.ui_state.interpolated,
                     );
                     self.map_renderer.ensure_initialized(render_state);
-                    self.map_renderer.upload_field_data(
+                    self.map_renderer.upload_field_data_with_range(
                         render_state,
                         &field.values,
                         field.width,
                         field.height,
+                        display_min,
+                        display_max,
                         self.ui_state.colormap,
                         self.ui_state.interpolated,
                     );
@@ -401,8 +448,9 @@ impl eframe::App for GeoScopeApp {
                     let orig_field = self.data_store.files[file_idx].field_data.clone();
 
                     let time_idx = self.ui_state.time_index;
+                    let level_idx = self.ui_state.level_index;
                     if let Ok(vec_data) = self.data_store.load_vector_field(
-                        file_idx, u_idx, v_idx, time_idx, 0,
+                        file_idx, u_idx, v_idx, time_idx, level_idx,
                     ) {
                         self.vector_overlay.density = self.ui_state.vector_density;
                         self.vector_overlay.scale = self.ui_state.vector_scale;

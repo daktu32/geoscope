@@ -57,12 +57,32 @@ pub struct UiState {
     // Cross-section settings
     pub cross_section_axis: crate::data::CrossSectionAxis,
     pub cross_section_idx: usize,
+    // Level selection
+    pub level_index: usize,
     // Vector overlay settings
     pub vector_overlay_enabled: bool,
     pub vector_u_var: Option<usize>,
     pub vector_v_var: Option<usize>,
     pub vector_density: usize,
     pub vector_scale: f32,
+    // Colormap range mode
+    pub range_mode: RangeMode,
+    pub manual_min: f32,
+    pub manual_max: f32,
+    /// Cached global range (computed in app.rs, displayed in Inspector)
+    pub global_range: Option<(f32, f32)>,
+}
+
+/// Range mode for colormap scaling.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum RangeMode {
+    /// Auto-scale from the currently displayed slice.
+    #[default]
+    Slice,
+    /// Auto-scale from the global min/max across all time steps and levels.
+    Global,
+    /// User-specified fixed min/max.
+    Manual,
 }
 
 impl Default for UiState {
@@ -79,11 +99,16 @@ impl Default for UiState {
             map_projection: MapProjection::default(),
             cross_section_axis: crate::data::CrossSectionAxis::default(),
             cross_section_idx: 0,
+            level_index: 0,
             vector_overlay_enabled: false,
             vector_u_var: None,
             vector_v_var: None,
             vector_density: 8,
             vector_scale: 1.0,
+            range_mode: RangeMode::Slice,
+            manual_min: 0.0,
+            manual_max: 1.0,
+            global_range: None,
         }
     }
 }
@@ -244,7 +269,7 @@ impl GeoScopeTabViewer<'_> {
                         if let Some(fi) = self.data_store.active_file {
                             if let Some(file) = self.data_store.files.get(fi) {
                                 if let Some(vi) = file.selected_variable {
-                                    if self.data_store.load_field_at(fi, vi, new_t, 0).is_ok() {
+                                    if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
                                         *self.data_generation += 1;
                                     }
                                 }
@@ -286,7 +311,42 @@ impl GeoScopeTabViewer<'_> {
                 });
             });
 
-        // Time slider (above tab bar)
+        // Level slider (above tab bar, below time slider)
+        if let Some((level_name, level_size)) = self.active_level_dim() {
+            if level_size > 1 {
+                egui::TopBottomPanel::bottom("viewport_level")
+                    .frame(egui::Frame::NONE)
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(format!("{}={}", level_name, self.ui_state.level_index))
+                                    .monospace()
+                                    .size(11.0),
+                            );
+
+                            let max_lev = level_size - 1;
+                            let mut lev = self.ui_state.level_index.min(max_lev);
+                            let slider = egui::Slider::new(&mut lev, 0..=max_lev)
+                                .show_value(false);
+                            if ui.add(slider).changed() {
+                                self.ui_state.level_index = lev;
+                                if let Some(fi) = self.data_store.active_file {
+                                    if let Some(file) = self.data_store.files.get(fi) {
+                                        if let Some(vi) = file.selected_variable {
+                                            let t = self.ui_state.time_index;
+                                            if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
+                                                *self.data_generation += 1;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        });
+                    });
+            }
+        }
+
+        // Time slider (above level slider)
         if let Some(time_len) = self.active_time_dim_len() {
             if time_len > 1 {
                 egui::TopBottomPanel::bottom("viewport_time")
@@ -319,7 +379,7 @@ impl GeoScopeTabViewer<'_> {
                                 if let Some(fi) = self.data_store.active_file {
                                     if let Some(file) = self.data_store.files.get(fi) {
                                         if let Some(vi) = file.selected_variable {
-                                            if self.data_store.load_field_at(fi, vi, t, 0).is_ok() {
+                                            if self.data_store.load_field_at(fi, vi, t, self.ui_state.level_index).is_ok() {
                                                 *self.data_generation += 1;
                                             }
                                         }
@@ -484,10 +544,72 @@ impl GeoScopeTabViewer<'_> {
                         ui.label(egui::RichText::new("Range").size(11.0).color(egui::Color32::from_gray(160)));
                         ui.add_space(2.0);
                         ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Slice:").size(11.0).color(egui::Color32::from_gray(140)));
                             ui.label(egui::RichText::new(format!("{:.4e}", field.min)).monospace().size(11.0));
                             ui.label(egui::RichText::new("→").size(11.0));
                             ui.label(egui::RichText::new(format!("{:.4e}", field.max)).monospace().size(11.0));
                         });
+                        if let Some((gmin, gmax)) = self.ui_state.global_range {
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Global:").size(11.0).color(egui::Color32::from_gray(140)));
+                                ui.label(egui::RichText::new(format!("{:.4e}", gmin)).monospace().size(11.0));
+                                ui.label(egui::RichText::new("→").size(11.0));
+                                ui.label(egui::RichText::new(format!("{:.4e}", gmax)).monospace().size(11.0));
+                            });
+                        }
+
+                        ui.add_space(2.0);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new("Scale:").size(11.0).color(egui::Color32::from_gray(140)));
+                            if ui.selectable_label(
+                                self.ui_state.range_mode == RangeMode::Slice,
+                                egui::RichText::new("Slice").size(11.0),
+                            ).clicked() {
+                                self.ui_state.range_mode = RangeMode::Slice;
+                                *self.data_generation += 1;
+                            }
+                            if ui.selectable_label(
+                                self.ui_state.range_mode == RangeMode::Global,
+                                egui::RichText::new("Global").size(11.0),
+                            ).clicked() {
+                                self.ui_state.range_mode = RangeMode::Global;
+                                *self.data_generation += 1;
+                            }
+                            if ui.selectable_label(
+                                self.ui_state.range_mode == RangeMode::Manual,
+                                egui::RichText::new("Manual").size(11.0),
+                            ).clicked() {
+                                self.ui_state.range_mode = RangeMode::Manual;
+                                // Initialize manual range from current data
+                                self.ui_state.manual_min = field.min;
+                                self.ui_state.manual_max = field.max;
+                                *self.data_generation += 1;
+                            }
+                        });
+
+                        if self.ui_state.range_mode == RangeMode::Manual {
+                            ui.add_space(2.0);
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Min:").size(11.0));
+                                if ui.add(egui::DragValue::new(&mut self.ui_state.manual_min)
+                                    .speed(0.01)
+                                    .max_decimals(4))
+                                    .changed()
+                                {
+                                    *self.data_generation += 1;
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(egui::RichText::new("Max:").size(11.0));
+                                if ui.add(egui::DragValue::new(&mut self.ui_state.manual_max)
+                                    .speed(0.01)
+                                    .max_decimals(4))
+                                    .changed()
+                                {
+                                    *self.data_generation += 1;
+                                }
+                            });
+                        }
 
                         let dims: Vec<String> = var
                             .dimensions
@@ -706,6 +828,7 @@ impl GeoScopeTabViewer<'_> {
                     .color(egui::Color32::from_gray(128)),
             );
         }
+
     }
 
     /// Returns the length of the time dimension for the active variable, if any.
@@ -717,5 +840,19 @@ impl GeoScopeTabViewer<'_> {
             .iter()
             .find(|(name, _)| name == "time" || name == "t")
             .map(|(_, size)| *size)
+    }
+
+    /// Returns (level_dim_name, level_dim_size) for the active variable, if any.
+    fn active_level_dim(&self) -> Option<(String, usize)> {
+        let file = self.data_store.files.get(self.data_store.active_file?)?;
+        let var_idx = file.selected_variable?;
+        let var = &file.variables[var_idx];
+        var.dimensions
+            .iter()
+            .find(|(name, _)| {
+                let lower = name.to_ascii_lowercase();
+                ["level", "lev", "z", "sigma"].iter().any(|&c| c == lower)
+            })
+            .map(|(name, size)| (name.clone(), *size))
     }
 }

@@ -371,6 +371,7 @@ impl GlobeRenderer {
             .insert(resources);
     }
 
+    #[allow(dead_code)]
     pub fn upload_field_data(
         &mut self,
         render_state: &egui_wgpu::RenderState,
@@ -380,9 +381,6 @@ impl GlobeRenderer {
         colormap: crate::ui::Colormap,
         interpolated: bool,
     ) {
-        let device = &render_state.device;
-        let queue = &render_state.queue;
-
         let mut min = f32::INFINITY;
         let mut max = f32::NEG_INFINITY;
         for &v in data {
@@ -394,6 +392,23 @@ impl GlobeRenderer {
         if min >= max {
             max = min + 1.0;
         }
+        self.upload_field_data_with_range(render_state, data, width, height, min, max, colormap, interpolated);
+    }
+
+    pub fn upload_field_data_with_range(
+        &mut self,
+        render_state: &egui_wgpu::RenderState,
+        data: &[f32],
+        width: usize,
+        height: usize,
+        min: f32,
+        max: f32,
+        colormap: crate::ui::Colormap,
+        interpolated: bool,
+    ) {
+        let device = &render_state.device;
+        let queue = &render_state.queue;
+
         self.data_min = min;
         self.data_max = max;
         self.interpolated = interpolated;

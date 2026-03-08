@@ -490,6 +490,44 @@ impl DataStore {
         })
     }
 
+    /// Compute the global min/max across all time steps and levels for a variable.
+    /// This scans the entire variable in the NetCDF file.
+    pub fn compute_global_range(
+        &self,
+        file_idx: usize,
+        var_idx: usize,
+    ) -> Result<(f32, f32), String> {
+        let file_entry = &self.files[file_idx];
+        let var_info = &file_entry.variables[var_idx];
+
+        let file = netcdf::open(&file_entry.path)
+            .map_err(|e| format!("Failed to reopen file: {e}"))?;
+
+        let var = file
+            .variable(&var_info.name)
+            .ok_or_else(|| format!("Variable '{}' not found", var_info.name))?;
+
+        // Read ALL values of the variable
+        let values: Vec<f64> = var
+            .get_values(..)
+            .map_err(|e| format!("Failed to read data: {e}"))?;
+
+        let mut min = f32::INFINITY;
+        let mut max = f32::NEG_INFINITY;
+        for &v in &values {
+            let v = v as f32;
+            if v.is_finite() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+        if min >= max {
+            max = min + 1.0;
+        }
+
+        Ok((min, max))
+    }
+
     pub fn active_field(&self) -> Option<&FieldData> {
         let file = self.files.get(self.active_file?)?;
         file.field_data.as_ref()
