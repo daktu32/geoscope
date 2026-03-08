@@ -413,11 +413,13 @@ impl GeoScopeTabViewer<'_> {
                         let new_t = (self.ui_state.time_index + 1) % time_len;
                         self.ui_state.time_index = new_t;
                         self.ui_state.playing = false;
-                        if let Some(fi) = self.data_store.active_file {
-                            if let Some(file) = self.data_store.files.get(fi) {
-                                if let Some(vi) = file.selected_variable {
-                                    if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
-                                        *self.data_generation += 1;
+                        if self.ui_state.view_mode != ViewMode::Profile {
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
                                     }
                                 }
                             }
@@ -427,11 +429,13 @@ impl GeoScopeTabViewer<'_> {
                         let new_t = if self.ui_state.time_index == 0 { time_len - 1 } else { self.ui_state.time_index - 1 };
                         self.ui_state.time_index = new_t;
                         self.ui_state.playing = false;
-                        if let Some(fi) = self.data_store.active_file {
-                            if let Some(file) = self.data_store.files.get(fi) {
-                                if let Some(vi) = file.selected_variable {
-                                    if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
-                                        *self.data_generation += 1;
+                        if self.ui_state.view_mode != ViewMode::Profile {
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
                                     }
                                 }
                             }
@@ -507,11 +511,14 @@ impl GeoScopeTabViewer<'_> {
                     let new_t = (self.ui_state.time_index + steps) % time_len;
                     if new_t != self.ui_state.time_index {
                         self.ui_state.time_index = new_t;
-                        if let Some(fi) = self.data_store.active_file {
-                            if let Some(file) = self.data_store.files.get(fi) {
-                                if let Some(vi) = file.selected_variable {
-                                    if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
-                                        *self.data_generation += 1;
+                        // Profile view only needs the playhead to move — skip expensive field reload
+                        if self.ui_state.view_mode != ViewMode::Profile {
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
                                     }
                                 }
                             }
@@ -618,11 +625,13 @@ impl GeoScopeTabViewer<'_> {
                             if ui.add(slider).changed() {
                                 self.ui_state.time_index = t;
                                 self.ui_state.playing = false;
-                                if let Some(fi) = self.data_store.active_file {
-                                    if let Some(file) = self.data_store.files.get(fi) {
-                                        if let Some(vi) = file.selected_variable {
-                                            if self.data_store.load_field_at(fi, vi, t, self.ui_state.level_index).is_ok() {
-                                                *self.data_generation += 1;
+                                if self.ui_state.view_mode != ViewMode::Profile {
+                                    if let Some(fi) = self.data_store.active_file {
+                                        if let Some(file) = self.data_store.files.get(fi) {
+                                            if let Some(vi) = file.selected_variable {
+                                                if self.data_store.load_field_at(fi, vi, t, self.ui_state.level_index).is_ok() {
+                                                    *self.data_generation += 1;
+                                                }
                                             }
                                         }
                                     }
