@@ -13,6 +13,8 @@ pub enum MapProjection {
     #[default]
     Equirectangular,
     Mollweide,
+    PolarNorth,
+    PolarSouth,
 }
 
 // ---------------------------------------------------------------------------
@@ -140,6 +142,8 @@ impl MapRenderer {
         let (vertices, indices) = match projection {
             MapProjection::Equirectangular => generate_flat_grid(128, 64),
             MapProjection::Mollweide => generate_mollweide_grid(128, 64),
+            MapProjection::PolarNorth => generate_polar_grid(128, 32, true),
+            MapProjection::PolarSouth => generate_polar_grid(128, 32, false),
         };
 
         let device = &render_state.device;
@@ -799,6 +803,123 @@ fn generate_mollweide_grid(lon_segments: u32, lat_segments: u32) -> (Vec<Vertex>
             indices.push(second);
             indices.push(second + 1);
             indices.push(first + 1);
+        }
+    }
+
+    (vertices, indices)
+}
+
+// ---------------------------------------------------------------------------
+// Polar stereographic grid mesh generation
+// ---------------------------------------------------------------------------
+
+fn generate_polar_grid(lon_segments: usize, lat_segments: usize, north: bool) -> (Vec<Vertex>, Vec<u32>) {
+    use std::f32::consts::PI;
+
+    let mut vertices = Vec::new();
+    let mut indices = Vec::new();
+
+    // Latitude range: for north pole [90°, 0°], for south pole [-90°, 0°]
+    // In radians: north [PI/2, 0], south [-PI/2, 0]
+    let (lat_start, lat_end) = if north {
+        (PI / 2.0, 0.0)
+    } else {
+        (-PI / 2.0, 0.0)
+    };
+
+    // Maximum radius (at the boundary latitude) determines NDC scale
+    let boundary_lat: f32 = lat_end;
+    let max_r = if north {
+        boundary_lat.cos() / (1.0 + boundary_lat.sin())
+    } else {
+        boundary_lat.cos() / (1.0 - boundary_lat.sin())
+    };
+    let scale = if max_r > 1e-6 { 1.0 / max_r } else { 1.0 };
+
+    // Center vertex (the pole itself)
+    let pole_u = 0.5; // center of texture in u
+    let pole_v = if north { 0.0 } else { 1.0 };
+    vertices.push(Vertex {
+        position: [0.0, 0.0, 0.0],
+        uv: [pole_u, pole_v],
+    });
+
+    // Generate ring vertices from pole outward
+    for ring in 1..=lat_segments {
+        let t = ring as f32 / lat_segments as f32;
+        let lat = lat_start + (lat_end - lat_start) * t;
+
+        let r = if north {
+            lat.cos() / (1.0 + lat.sin())
+        } else {
+            lat.cos() / (1.0 - lat.sin())
+        };
+
+        // UV v coordinate: 0 at north pole, 1 at south pole
+        let v_coord = (PI / 2.0 - lat) / PI;
+
+        for seg in 0..lon_segments {
+            let lon = 2.0 * PI * seg as f32 / lon_segments as f32;
+            let x = r * lon.cos() * scale;
+            let y = if north {
+                r * lon.sin() * scale
+            } else {
+                -r * lon.sin() * scale
+            };
+
+            let u_coord = lon / (2.0 * PI);
+
+            vertices.push(Vertex {
+                position: [x, y, 0.0],
+                uv: [u_coord, v_coord],
+            });
+        }
+    }
+
+    // Triangle fan from center to first ring
+    for seg in 0..lon_segments {
+        let next = (seg + 1) % lon_segments;
+        indices.push(0); // center
+        if north {
+            indices.push((1 + seg) as u32);
+            indices.push((1 + next) as u32);
+        } else {
+            // Reverse winding for south to keep consistent face
+            indices.push((1 + next) as u32);
+            indices.push((1 + seg) as u32);
+        }
+    }
+
+    // Quad strips between adjacent rings
+    for ring in 1..lat_segments {
+        let ring_start = 1 + (ring - 1) * lon_segments;
+        let next_ring_start = 1 + ring * lon_segments;
+
+        for seg in 0..lon_segments {
+            let next = (seg + 1) % lon_segments;
+
+            let a = (ring_start + seg) as u32;
+            let b = (ring_start + next) as u32;
+            let c = (next_ring_start + seg) as u32;
+            let d = (next_ring_start + next) as u32;
+
+            if north {
+                indices.push(a);
+                indices.push(c);
+                indices.push(b);
+
+                indices.push(c);
+                indices.push(d);
+                indices.push(b);
+            } else {
+                indices.push(a);
+                indices.push(b);
+                indices.push(c);
+
+                indices.push(c);
+                indices.push(b);
+                indices.push(d);
+            }
         }
     }
 

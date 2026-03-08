@@ -75,6 +75,17 @@ pub struct CrossSectionData {
     pub axis: CrossSectionAxis,
 }
 
+/// Profile data (1D line graph: vertical profile or time series).
+#[derive(Debug, Clone)]
+pub struct ProfileData {
+    pub values: Vec<f32>,
+    pub axis_values: Vec<f64>,
+    pub axis_label: String,
+    pub value_label: String,
+    pub min: f32,
+    pub max: f32,
+}
+
 /// Vector field data (u, v components) for overlay rendering.
 #[derive(Debug, Clone)]
 pub struct VectorFieldData {
@@ -526,6 +537,167 @@ impl DataStore {
         }
 
         Ok((min, max))
+    }
+
+    /// Load a 1D vertical profile at a fixed (time, lon, lat) point.
+    /// Extracts values along the level/height dimension.
+    pub fn load_profile_data(
+        &self,
+        file_idx: usize,
+        var_idx: usize,
+        time_idx: usize,
+        lon_idx: usize,
+        lat_idx: usize,
+    ) -> Option<ProfileData> {
+        let file_entry = &self.files[file_idx];
+        let var_info = &file_entry.variables[var_idx];
+
+        let file = netcdf::open(&file_entry.path).ok()?;
+        let var = file.variable(&var_info.name)?;
+
+        let dims = &var_info.dimensions;
+        let ndim = dims.len();
+
+        // Find the level dimension (not time, not lat, not lon)
+        let (level_pos, n_levels) = find_dim(dims, LEVEL_NAMES)?;
+
+        let time_pos = find_dim(dims, TIME_NAMES).map(|(p, _)| p);
+        let lat_pos = find_dim(dims, LAT_NAMES).map(|(p, _)| p);
+        let lon_pos = find_dim(dims, LON_NAMES).map(|(p, _)| p);
+
+        let mut start = vec![0usize; ndim];
+        let mut count = vec![1usize; ndim];
+
+        if let Some(tp) = time_pos {
+            start[tp] = time_idx;
+        }
+        if let Some(lp) = lat_pos {
+            start[lp] = lat_idx;
+        }
+        if let Some(lop) = lon_pos {
+            start[lop] = lon_idx;
+        }
+        start[level_pos] = 0;
+        count[level_pos] = n_levels;
+
+        let extents: Vec<std::ops::Range<usize>> = start
+            .iter()
+            .zip(count.iter())
+            .map(|(&s, &c)| s..s + c)
+            .collect();
+
+        let values_f64: Vec<f64> = var.get_values(extents.as_slice()).ok()?;
+        let values: Vec<f32> = values_f64.iter().map(|&v| v as f32).collect();
+
+        let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+        // Get axis coordinate values (level dimension values)
+        let level_dim_name = &dims[level_pos].0;
+        let axis_values = file
+            .variable(level_dim_name)
+            .and_then(|v| v.get_values::<f64, _>(..).ok())
+            .unwrap_or_else(|| (0..n_levels).map(|i| i as f64).collect());
+
+        Some(ProfileData {
+            values,
+            axis_values,
+            axis_label: level_dim_name.clone(),
+            value_label: var_info.name.clone(),
+            min,
+            max,
+        })
+    }
+
+    /// Load a 1D time series at a fixed (level, lon, lat) point.
+    /// Extracts values along the time dimension.
+    pub fn load_time_series_data(
+        &self,
+        file_idx: usize,
+        var_idx: usize,
+        level_idx: usize,
+        lon_idx: usize,
+        lat_idx: usize,
+    ) -> Option<ProfileData> {
+        let file_entry = &self.files[file_idx];
+        let var_info = &file_entry.variables[var_idx];
+
+        let file = netcdf::open(&file_entry.path).ok()?;
+        let var = file.variable(&var_info.name)?;
+
+        let dims = &var_info.dimensions;
+        let ndim = dims.len();
+
+        // Find the time dimension
+        let (time_pos, n_time) = find_dim(dims, TIME_NAMES)?;
+
+        let level_pos = find_dim(dims, LEVEL_NAMES).map(|(p, _)| p);
+        let lat_pos = find_dim(dims, LAT_NAMES).map(|(p, _)| p);
+        let lon_pos = find_dim(dims, LON_NAMES).map(|(p, _)| p);
+
+        let mut start = vec![0usize; ndim];
+        let mut count = vec![1usize; ndim];
+
+        if let Some(lp) = level_pos {
+            start[lp] = level_idx;
+        }
+        if let Some(ltp) = lat_pos {
+            start[ltp] = lat_idx;
+        }
+        if let Some(lop) = lon_pos {
+            start[lop] = lon_idx;
+        }
+        start[time_pos] = 0;
+        count[time_pos] = n_time;
+
+        let extents: Vec<std::ops::Range<usize>> = start
+            .iter()
+            .zip(count.iter())
+            .map(|(&s, &c)| s..s + c)
+            .collect();
+
+        let values_f64: Vec<f64> = var.get_values(extents.as_slice()).ok()?;
+        let values: Vec<f32> = values_f64.iter().map(|&v| v as f32).collect();
+
+        let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+        // Time axis: use time coordinate values if available, otherwise indices
+        let time_dim_name = &dims[time_pos].0;
+        let axis_values = file
+            .variable(time_dim_name)
+            .and_then(|v| v.get_values::<f64, _>(..).ok())
+            .unwrap_or_else(|| (0..n_time).map(|i| i as f64).collect());
+
+        Some(ProfileData {
+            values,
+            axis_values,
+            axis_label: time_dim_name.clone(),
+            value_label: var_info.name.clone(),
+            min,
+            max,
+        })
+    }
+
+    /// Compute the zonal (longitudinal) mean of a 2D field.
+    /// Returns a FieldData with width=1 and the same height as the input.
+    pub fn compute_zonal_mean(&self, field: &FieldData) -> FieldData {
+        let mut values = Vec::with_capacity(field.height);
+        for lat in 0..field.height {
+            let row_start = lat * field.width;
+            let row_end = row_start + field.width;
+            let sum: f32 = field.values[row_start..row_end].iter().sum();
+            values.push(sum / field.width as f32);
+        }
+        let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        FieldData {
+            values,
+            width: 1,
+            height: field.height,
+            min,
+            max,
+        }
     }
 
     pub fn active_field(&self) -> Option<&FieldData> {
