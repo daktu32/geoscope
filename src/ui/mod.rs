@@ -21,7 +21,7 @@ pub enum ViewMode {
 }
 
 /// Colormap selection.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum Colormap {
     // Sequential
     #[default]
@@ -51,14 +51,6 @@ impl Colormap {
             Self::Coolwarm => "Coolwarm",
             Self::Spectral => "Spectral",
             Self::BrBG => "BrBG",
-        }
-    }
-
-    pub fn category(&self) -> &'static str {
-        match self {
-            Self::Viridis | Self::Plasma | Self::Inferno
-            | Self::Magma | Self::Cividis | Self::Turbo => "Sequential",
-            Self::RdBuR | Self::Coolwarm | Self::Spectral | Self::BrBG => "Diverging",
         }
     }
 
@@ -173,6 +165,8 @@ pub struct GeoScopeTabViewer<'a> {
     pub data_generation: &'a mut u64,
     /// Paths requested to open via the UI.
     pub open_file_request: &'a mut Vec<std::path::PathBuf>,
+    /// Pre-computed colormap LUTs.
+    pub lut_cache: &'a std::collections::HashMap<Colormap, Vec<u8>>,
 }
 
 impl TabViewer for GeoScopeTabViewer<'_> {
@@ -240,16 +234,9 @@ impl GeoScopeTabViewer<'_> {
                 egui::RichText::new(format!("📁 {file_name}")).size(12.0)
             };
 
-            egui::CollapsingHeader::new(header_text)
-            .default_open(true)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.small_button("×").clicked() {
-                            close_request = Some(file_idx);
-                        }
-                    });
-                });
+            let header_resp = egui::CollapsingHeader::new(header_text)
+                .default_open(true)
+                .show(ui, |ui| {
                 for (var_idx, var) in file.variables.iter().enumerate() {
                     let is_coord = var.dimensions.len() <= 1
                         && var.dimensions.first().is_some_and(|(d, _)| d == &var.name);
@@ -309,6 +296,24 @@ impl GeoScopeTabViewer<'_> {
                     });
                 }
             });
+            // Close button painted on header row
+            let header_rect = header_resp.header_response.rect;
+            let btn_size = 14.0;
+            let btn_pos = egui::pos2(header_rect.right() - btn_size - 2.0, header_rect.center().y - btn_size * 0.5);
+            let btn_rect = egui::Rect::from_min_size(btn_pos, egui::vec2(btn_size, btn_size));
+            let btn_resp = ui.allocate_rect(btn_rect, egui::Sense::click());
+            let btn_color = if btn_resp.hovered() {
+                egui::Color32::from_gray(200)
+            } else {
+                egui::Color32::from_gray(100)
+            };
+            ui.painter().text(
+                btn_rect.center(), egui::Align2::CENTER_CENTER,
+                "×", egui::FontId::proportional(12.0), btn_color,
+            );
+            if btn_resp.clicked() {
+                close_request = Some(file_idx);
+            }
         }
 
         if let Some((file_idx, var_idx)) = load_request {
@@ -530,204 +535,193 @@ impl GeoScopeTabViewer<'_> {
         ui.allocate_rect(central, egui::Sense::hover());
     }
 
+    /// Helper: draw a section header label.
+    fn section_header(ui: &mut egui::Ui, text: &str) {
+        ui.label(egui::RichText::new(text).size(11.0).strong().color(egui::Color32::from_rgb(0, 164, 154)));
+    }
+
+    /// Helper: draw a dim label.
+    fn dim_label(ui: &mut egui::Ui, text: &str) {
+        ui.label(egui::RichText::new(text).size(10.0).color(egui::Color32::from_gray(120)));
+    }
+
+    /// Helper: draw colorbar gradient mesh into an allocated rect, returns the rect.
+    fn draw_colorbar(ui: &mut egui::Ui, lut: &[u8], width: f32, height: f32) -> egui::Rect {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+        let painter = ui.painter();
+        let mut mesh = egui::Mesh::default();
+        let n = 64usize;
+        for i in 0..=n {
+            let t = i as f32 / n as f32;
+            let idx = (t * 255.0) as usize;
+            let base = idx * 4;
+            let color = egui::Color32::from_rgb(lut[base], lut[base + 1], lut[base + 2]);
+            let x = rect.left() + t * rect.width();
+            mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+            mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+        }
+        for i in 0..n {
+            let tl = (i * 2) as u32;
+            mesh.add_triangle(tl, tl + 1, tl + 2);
+            mesh.add_triangle(tl + 1, tl + 3, tl + 2);
+        }
+        painter.add(egui::Shape::mesh(mesh));
+        rect
+    }
+
     fn inspector_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.label(egui::RichText::new("Inspector").strong().size(14.0));
-        ui.add_space(4.0);
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Inspector").strong().size(13.0));
+        ui.add_space(6.0);
 
         if let Some(file_idx) = self.data_store.active_file {
             if let Some(file) = self.data_store.files.get(file_idx) {
                 if let Some(var_idx) = file.selected_variable {
                     let var = &file.variables[var_idx];
 
-                    // Variable name section
-                    ui.label(egui::RichText::new("Variable").size(11.0).color(egui::Color32::from_gray(160)));
-                    ui.label(egui::RichText::new(&var.name).strong().size(14.0));
-                    if let Some(ref units) = var.units {
-                        ui.label(
-                            egui::RichText::new(units.as_str())
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(160)),
-                        );
+                    // --- Variable ---
+                    Self::section_header(ui, "VARIABLE");
+                    ui.add_space(2.0);
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(&var.name).strong().size(14.0));
+                        if let Some(ref units) = var.units {
+                            ui.label(
+                                egui::RichText::new(format!("[{}]", units))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_gray(150)),
+                            );
+                        }
+                    });
+                    if let Some(ref field) = file.field_data {
+                        let dims: Vec<String> = var.dimensions.iter().map(|(n, s)| format!("{n}={s}")).collect();
+                        Self::dim_label(ui, &format!("{}x{}  ({})", field.width, field.height, dims.join(", ")));
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
 
-                    // Colormap section
-                    ui.label(egui::RichText::new("Colormap").size(11.0).color(egui::Color32::from_gray(160)));
-                    ui.add_space(2.0);
+                    // --- Colormap ---
+                    Self::section_header(ui, "COLORMAP");
+                    ui.add_space(3.0);
                     egui::ComboBox::from_id_salt("colormap_combo")
-                        .selected_text(format!("{} ({})", self.ui_state.colormap.label(), self.ui_state.colormap.category()))
+                        .selected_text(self.ui_state.colormap.label())
                         .width(ui.available_width() - 8.0)
                         .show_ui(ui, |ui| {
                             ui.label(egui::RichText::new("Sequential").size(10.0).color(egui::Color32::from_gray(120)));
                             for cm in Colormap::SEQUENTIAL {
-                                ui.selectable_value(
-                                    &mut self.ui_state.colormap,
-                                    cm,
-                                    cm.label(),
-                                );
+                                ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
                             }
                             ui.separator();
                             ui.label(egui::RichText::new("Diverging").size(10.0).color(egui::Color32::from_gray(120)));
                             for cm in Colormap::DIVERGING {
-                                ui.selectable_value(
-                                    &mut self.ui_state.colormap,
-                                    cm,
-                                    cm.label(),
-                                );
+                                ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
                             }
                         });
 
-                    // Colormap gradient preview (smooth, LUT-based)
+                    // Gradient preview + min/max labels
                     ui.add_space(4.0);
-                    let available_width = ui.available_width() - 8.0;
-                    let bar_height = 14.0;
-                    let (rect, _) =
-                        ui.allocate_exact_size(egui::vec2(available_width, bar_height), egui::Sense::hover());
-                    let lut = crate::renderer::common::colormap_lut(self.ui_state.colormap);
-                    let painter = ui.painter();
-                    // Use an egui Mesh for smooth per-vertex color interpolation
-                    let mut mesh = egui::Mesh::default();
-                    let n_stops = 64;
-                    for i in 0..=n_stops {
-                        let t = i as f32 / n_stops as f32;
-                        let idx = (t * 255.0) as usize;
-                        let base = idx * 4;
-                        let color = egui::Color32::from_rgb(lut[base], lut[base + 1], lut[base + 2]);
-                        let x = rect.left() + t * rect.width();
-                        mesh.colored_vertex(egui::pos2(x, rect.top()), color);
-                        mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
-                    }
-                    for i in 0..n_stops {
-                        let tl = (i * 2) as u32;
-                        let bl = tl + 1;
-                        let tr = tl + 2;
-                        let br = tl + 3;
-                        mesh.add_triangle(tl, bl, tr);
-                        mesh.add_triangle(bl, br, tr);
-                    }
-                    painter.add(egui::Shape::mesh(mesh));
+                    let bar_w = ui.available_width() - 8.0;
+                    let lut = &self.lut_cache[&self.ui_state.colormap];
+                    let bar_rect = Self::draw_colorbar(ui, lut, bar_w, 12.0);
 
-                    // Interpolation mode toggle
-                    ui.add_space(4.0);
+                    // Min/max labels below colorbar
+                    if let Some(ref field) = file.field_data {
+                        let (dmin, dmax) = match self.ui_state.range_mode {
+                            RangeMode::Slice => (field.min, field.max),
+                            RangeMode::Global => self.ui_state.global_range.unwrap_or((field.min, field.max)),
+                            RangeMode::Manual => (self.ui_state.manual_min, self.ui_state.manual_max),
+                        };
+                        let painter = ui.painter();
+                        let label_color = egui::Color32::from_gray(150);
+                        let font = egui::FontId::monospace(9.0);
+                        painter.text(
+                            egui::pos2(bar_rect.left(), bar_rect.bottom() + 1.0),
+                            egui::Align2::LEFT_TOP, format!("{:.3e}", dmin), font.clone(), label_color,
+                        );
+                        painter.text(
+                            egui::pos2(bar_rect.right(), bar_rect.bottom() + 1.0),
+                            egui::Align2::RIGHT_TOP, format!("{:.3e}", dmax), font, label_color,
+                        );
+                        ui.add_space(12.0);
+                    }
+
+                    // Display mode
+                    ui.add_space(2.0);
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Display:").size(11.0).color(egui::Color32::from_gray(160)));
-                        if ui.selectable_label(!self.ui_state.interpolated, egui::RichText::new("Grid").size(11.0)).clicked() {
+                        Self::dim_label(ui, "Display");
+                        if ui.selectable_label(!self.ui_state.interpolated, egui::RichText::new("Grid").size(10.0)).clicked() {
                             self.ui_state.interpolated = false;
                             *self.data_generation += 1;
                         }
-                        if ui.selectable_label(self.ui_state.interpolated, egui::RichText::new("Smooth").size(11.0)).clicked() {
+                        if ui.selectable_label(self.ui_state.interpolated, egui::RichText::new("Smooth").size(10.0)).clicked() {
                             self.ui_state.interpolated = true;
                             *self.data_generation += 1;
                         }
                     });
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
 
-                    // Range section
+                    // --- Range ---
                     if let Some(ref field) = file.field_data {
-                        ui.label(egui::RichText::new("Range").size(11.0).color(egui::Color32::from_gray(160)));
-                        ui.add_space(2.0);
+                        Self::section_header(ui, "RANGE");
+                        ui.add_space(3.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Slice:").size(11.0).color(egui::Color32::from_gray(140)));
-                            ui.label(egui::RichText::new(format!("{:.4e}", field.min)).monospace().size(11.0));
-                            ui.label(egui::RichText::new("→").size(11.0));
-                            ui.label(egui::RichText::new(format!("{:.4e}", field.max)).monospace().size(11.0));
+                            Self::dim_label(ui, "Slice");
+                            ui.label(egui::RichText::new(format!("{:.4e} → {:.4e}", field.min, field.max)).monospace().size(10.0));
                         });
                         if let Some((gmin, gmax)) = self.ui_state.global_range {
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Global:").size(11.0).color(egui::Color32::from_gray(140)));
-                                ui.label(egui::RichText::new(format!("{:.4e}", gmin)).monospace().size(11.0));
-                                ui.label(egui::RichText::new("→").size(11.0));
-                                ui.label(egui::RichText::new(format!("{:.4e}", gmax)).monospace().size(11.0));
+                                Self::dim_label(ui, "Global");
+                                ui.label(egui::RichText::new(format!("{:.4e} → {:.4e}", gmin, gmax)).monospace().size(10.0));
                             });
                         }
 
-                        ui.add_space(2.0);
+                        ui.add_space(3.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Scale:").size(11.0).color(egui::Color32::from_gray(140)));
-                            if ui.selectable_label(
-                                self.ui_state.range_mode == RangeMode::Slice,
-                                egui::RichText::new("Slice").size(11.0),
-                            ).clicked() {
-                                self.ui_state.range_mode = RangeMode::Slice;
-                                *self.data_generation += 1;
-                            }
-                            if ui.selectable_label(
-                                self.ui_state.range_mode == RangeMode::Global,
-                                egui::RichText::new("Global").size(11.0),
-                            ).clicked() {
-                                self.ui_state.range_mode = RangeMode::Global;
-                                *self.data_generation += 1;
-                            }
-                            if ui.selectable_label(
-                                self.ui_state.range_mode == RangeMode::Manual,
-                                egui::RichText::new("Manual").size(11.0),
-                            ).clicked() {
-                                self.ui_state.range_mode = RangeMode::Manual;
-                                // Initialize manual range from current data
-                                self.ui_state.manual_min = field.min;
-                                self.ui_state.manual_max = field.max;
-                                *self.data_generation += 1;
+                            Self::dim_label(ui, "Scale");
+                            for (mode, label) in [(RangeMode::Slice, "Slice"), (RangeMode::Global, "Global"), (RangeMode::Manual, "Manual")] {
+                                if ui.selectable_label(
+                                    self.ui_state.range_mode == mode,
+                                    egui::RichText::new(label).size(10.0),
+                                ).clicked() {
+                                    self.ui_state.range_mode = mode;
+                                    if mode == RangeMode::Manual {
+                                        self.ui_state.manual_min = field.min;
+                                        self.ui_state.manual_max = field.max;
+                                    }
+                                    *self.data_generation += 1;
+                                }
                             }
                         });
 
                         if self.ui_state.range_mode == RangeMode::Manual {
                             ui.add_space(2.0);
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Min:").size(11.0));
-                                if ui.add(egui::DragValue::new(&mut self.ui_state.manual_min)
-                                    .speed(0.01)
-                                    .max_decimals(4))
-                                    .changed()
-                                {
+                                ui.label(egui::RichText::new("Min").size(10.0));
+                                if ui.add(egui::DragValue::new(&mut self.ui_state.manual_min).speed(0.01).max_decimals(4)).changed() {
                                     *self.data_generation += 1;
                                 }
-                            });
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("Max:").size(11.0));
-                                if ui.add(egui::DragValue::new(&mut self.ui_state.manual_max)
-                                    .speed(0.01)
-                                    .max_decimals(4))
-                                    .changed()
-                                {
+                                ui.label(egui::RichText::new("Max").size(10.0));
+                                if ui.add(egui::DragValue::new(&mut self.ui_state.manual_max).speed(0.01).max_decimals(4)).changed() {
                                     *self.data_generation += 1;
                                 }
                             });
                         }
-
-                        let dims: Vec<String> = var
-                            .dimensions
-                            .iter()
-                            .map(|(n, s)| format!("{n}={s}"))
-                            .collect();
-                        ui.add_space(2.0);
-                        ui.label(
-                            egui::RichText::new(format!("{}×{}", field.width, field.height))
-                                .monospace()
-                                .size(11.0)
-                                .color(egui::Color32::from_gray(160)),
-                        );
-                        ui.label(
-                            egui::RichText::new(dims.join(", "))
-                                .size(10.0)
-                                .color(egui::Color32::from_gray(128)),
-                        );
                     }
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
 
-                    // Map projection selector (only in Map view)
+                    // --- View-specific settings ---
+
+                    // Map projection (Map view only)
                     if self.ui_state.view_mode == ViewMode::Map {
-                        ui.label(egui::RichText::new("Projection").size(11.0).color(egui::Color32::from_gray(160)));
-                        ui.add_space(2.0);
+                        Self::section_header(ui, "PROJECTION");
+                        ui.add_space(3.0);
                         egui::ComboBox::from_id_salt("projection_combo")
                             .selected_text(match self.ui_state.map_projection {
                                 MapProjection::Equirectangular => "Equirectangular",
@@ -735,38 +729,30 @@ impl GeoScopeTabViewer<'_> {
                             })
                             .width(ui.available_width() - 8.0)
                             .show_ui(ui, |ui| {
-                                ui.selectable_value(
-                                    &mut self.ui_state.map_projection,
-                                    MapProjection::Equirectangular,
-                                    "Equirectangular",
-                                );
-                                ui.selectable_value(
-                                    &mut self.ui_state.map_projection,
-                                    MapProjection::Mollweide,
-                                    "Mollweide",
-                                );
+                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Equirectangular, "Equirectangular");
+                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Mollweide, "Mollweide");
                             });
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         ui.separator();
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                     }
 
-                    // Cross-section settings (only in CrossSection view)
+                    // Cross-section (CrossSection view only)
                     if self.ui_state.view_mode == ViewMode::CrossSection {
-                        ui.label(egui::RichText::new("Cross Section").size(11.0).color(egui::Color32::from_gray(160)));
-                        ui.add_space(2.0);
+                        Self::section_header(ui, "CROSS SECTION");
+                        ui.add_space(3.0);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new("Axis:").size(11.0));
+                            Self::dim_label(ui, "Axis");
                             if ui.selectable_label(
                                 self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Latitude,
-                                egui::RichText::new("Fix Lat").size(11.0),
+                                egui::RichText::new("Fix Lat").size(10.0),
                             ).clicked() {
                                 self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Latitude;
                                 *self.data_generation += 1;
                             }
                             if ui.selectable_label(
                                 self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Longitude,
-                                egui::RichText::new("Fix Lon").size(11.0),
+                                egui::RichText::new("Fix Lon").size(10.0),
                             ).clicked() {
                                 self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Longitude;
                                 *self.data_generation += 1;
@@ -778,33 +764,27 @@ impl GeoScopeTabViewer<'_> {
                                 crate::data::CrossSectionAxis::Latitude => field.height.saturating_sub(1),
                                 crate::data::CrossSectionAxis::Longitude => field.width.saturating_sub(1),
                             }
-                        } else {
-                            0
-                        };
+                        } else { 0 };
 
                         if max_idx > 0 {
                             let mut idx = self.ui_state.cross_section_idx.min(max_idx);
-                            let slider = egui::Slider::new(&mut idx, 0..=max_idx)
-                                .text("Index");
-                            if ui.add(slider).changed() {
+                            if ui.add(egui::Slider::new(&mut idx, 0..=max_idx).text("Index")).changed() {
                                 self.ui_state.cross_section_idx = idx;
                                 *self.data_generation += 1;
                             }
                         }
-
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         ui.separator();
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                     }
 
-                    // Vector overlay settings (Globe/Map views)
+                    // Vector overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        ui.label(egui::RichText::new("Vector Overlay").size(11.0).color(egui::Color32::from_gray(160)));
-                        ui.add_space(2.0);
-                        ui.checkbox(&mut self.ui_state.vector_overlay_enabled, "Enabled");
+                        Self::section_header(ui, "VECTOR OVERLAY");
+                        ui.add_space(3.0);
+                        ui.checkbox(&mut self.ui_state.vector_overlay_enabled, egui::RichText::new("Enabled").size(11.0));
 
                         if self.ui_state.vector_overlay_enabled {
-                            // Auto-detect u/v pair if not set
                             if self.ui_state.vector_u_var.is_none() {
                                 if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
                                     self.ui_state.vector_u_var = Some(u_idx);
@@ -812,10 +792,9 @@ impl GeoScopeTabViewer<'_> {
                                 }
                             }
 
-                            // u/v variable selectors
                             let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("u:").size(11.0));
+                                ui.label(egui::RichText::new("u:").size(10.0));
                                 let mut u_idx = self.ui_state.vector_u_var.unwrap_or(0);
                                 egui::ComboBox::from_id_salt("vector_u_combo")
                                     .selected_text(var_names.get(u_idx).map(|s| s.as_str()).unwrap_or("?"))
@@ -828,7 +807,7 @@ impl GeoScopeTabViewer<'_> {
                                 self.ui_state.vector_u_var = Some(u_idx);
                             });
                             ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("v:").size(11.0));
+                                ui.label(egui::RichText::new("v:").size(10.0));
                                 let mut v_idx = self.ui_state.vector_v_var.unwrap_or(0);
                                 egui::ComboBox::from_id_salt("vector_v_combo")
                                     .selected_text(var_names.get(v_idx).map(|s| s.as_str()).unwrap_or("?"))
@@ -841,7 +820,6 @@ impl GeoScopeTabViewer<'_> {
                                 self.ui_state.vector_v_var = Some(v_idx);
                             });
 
-                            // Density and scale sliders
                             let mut density = self.ui_state.vector_density;
                             if ui.add(egui::Slider::new(&mut density, 2..=20).text("Density")).changed() {
                                 self.ui_state.vector_density = density;
@@ -851,41 +829,30 @@ impl GeoScopeTabViewer<'_> {
                                 self.ui_state.vector_scale = scale;
                             }
                         }
-
-                        ui.add_space(8.0);
+                        ui.add_space(6.0);
                         ui.separator();
-                        ui.add_space(4.0);
+                        ui.add_space(6.0);
                     }
 
-                    // Inference result
+                    // --- Inference ---
                     let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
-                    ui.label(egui::RichText::new("Inference").size(11.0).color(egui::Color32::from_gray(160)));
+                    Self::section_header(ui, "INFERENCE");
                     ui.add_space(2.0);
-                    ui.label(
-                        egui::RichText::new(&inference.description)
-                            .size(11.0),
-                    );
+                    ui.label(egui::RichText::new(&inference.description).size(10.0));
                     let confidence_label = match inference.confidence {
                         crate::data::inference::InferenceLevel::L1StandardName => "L1: standard_name",
                         crate::data::inference::InferenceLevel::L2NamePattern => "L2: name pattern",
                         crate::data::inference::InferenceLevel::L3Statistics => "L3: statistics",
                     };
-                    ui.label(
-                        egui::RichText::new(confidence_label)
-                            .size(10.0)
-                            .color(egui::Color32::from_gray(128)),
-                    );
+                    Self::dim_label(ui, confidence_label);
 
-                    ui.add_space(8.0);
+                    ui.add_space(6.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(6.0);
 
-                    // Export PNG button
+                    // --- Export ---
                     if file.field_data.is_some() {
-                        ui.label(egui::RichText::new("Export").size(11.0).color(egui::Color32::from_gray(160)));
-                        ui.add_space(2.0);
-                        if ui.button("Export PNG...").clicked() {
-                            // Pre-fill title with variable name
+                        if ui.button(egui::RichText::new("Export PNG...").size(11.0)).clicked() {
                             self.ui_state.export_settings.title = var.name.clone();
                             self.ui_state.export_dialog_open = true;
                         }

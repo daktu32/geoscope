@@ -1,6 +1,8 @@
 use eframe::CreationContext;
 use egui_dock::{DockArea, DockState, NodeIndex};
 
+use std::collections::HashMap;
+
 use crate::data::DataStore;
 use crate::renderer::GlobeRenderer;
 use crate::renderer::MapRenderer;
@@ -8,7 +10,7 @@ use crate::renderer::cross_section::CrossSectionRenderer;
 use crate::renderer::hovmoller::HovmollerRenderer;
 use crate::renderer::spectrum::SpectrumRenderer;
 use crate::renderer::vector_overlay::VectorOverlay;
-use crate::ui::{GeoScopeTabViewer, Tab};
+use crate::ui::{Colormap, GeoScopeTabViewer, Tab};
 
 const PRIMARY: egui::Color32 = egui::Color32::from_rgb(0, 164, 154);
 const BG_DARK: egui::Color32 = egui::Color32::from_rgb(24, 24, 32);
@@ -42,6 +44,8 @@ pub struct GeoScopeApp {
     /// Variable index used to compute the cached global range.
     global_range_var: Option<(usize, usize)>,
     theme_applied: bool,
+    /// Pre-computed colormap LUTs (256×RGBA per colormap).
+    lut_cache: HashMap<Colormap, Vec<u8>>,
 }
 
 impl GeoScopeApp {
@@ -76,6 +80,13 @@ impl GeoScopeApp {
             global_range_cache: None,
             global_range_var: None,
             theme_applied: false,
+            lut_cache: {
+                let mut m = HashMap::new();
+                for cm in Colormap::SEQUENTIAL.iter().chain(Colormap::DIVERGING.iter()) {
+                    m.insert(*cm, crate::renderer::common::colormap_lut(*cm));
+                }
+                m
+            },
         }
     }
 }
@@ -254,6 +265,7 @@ impl eframe::App for GeoScopeApp {
             ui_state: &mut self.ui_state,
             data_generation: &mut self.data_generation,
             open_file_request: &mut self.open_file_request,
+            lut_cache: &self.lut_cache,
         };
 
         // Top bar
@@ -361,7 +373,7 @@ impl eframe::App for GeoScopeApp {
                     let bar_w = ui.available_width() - 8.0;
                     let bar_h = 10.0;
                     let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
-                    let lut = crate::renderer::common::colormap_lut(self.ui_state.colormap);
+                    let lut = &self.lut_cache[&self.ui_state.colormap];
                     let painter = ui.painter();
                     let mut mesh = egui::Mesh::default();
                     let n_stops = 64;
@@ -527,10 +539,23 @@ impl eframe::App for GeoScopeApp {
                         if let Some(file) = self.data_store.files.get(file_idx) {
                             if let Some(var_idx) = file.selected_variable {
                                 let var = &file.variables[var_idx];
-                                self.ui_state.status_text = format!(
-                                    "{}: {}x{}, range [{:.4e}, {:.4e}]",
-                                    var.name, field.width, field.height, field.min, field.max,
-                                );
+                                let mut parts = vec![
+                                    format!("{}: {}x{}", var.name, field.width, field.height),
+                                ];
+                                // Time info
+                                if let Some(time_dim) = var.dimensions.iter().find(|(n, _)| {
+                                    matches!(n.as_str(), "time" | "t" | "Time" | "TIME")
+                                }) {
+                                    parts.push(format!("t={}/{}", self.ui_state.time_index, time_dim.1));
+                                }
+                                // Level info
+                                if let Some(lev_dim) = var.dimensions.iter().find(|(n, _)| {
+                                    matches!(n.as_str(), "level" | "lev" | "z" | "depth" | "plev" | "sigma")
+                                }) {
+                                    parts.push(format!("lev={}/{}", self.ui_state.level_index, lev_dim.1));
+                                }
+                                parts.push(format!("[{:.4e}, {:.4e}]", field.min, field.max));
+                                self.ui_state.status_text = parts.join("  ");
                             }
                         }
                     }
