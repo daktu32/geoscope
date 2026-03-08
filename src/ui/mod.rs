@@ -26,6 +26,9 @@ pub enum Colormap {
     #[default]
     Viridis,
     RdBuR,
+    Plasma,
+    Inferno,
+    Coolwarm,
 }
 
 impl Colormap {
@@ -33,11 +36,19 @@ impl Colormap {
         match self {
             Self::Viridis => "viridis",
             Self::RdBuR => "RdBu_r",
+            Self::Plasma => "plasma",
+            Self::Inferno => "inferno",
+            Self::Coolwarm => "coolwarm",
         }
     }
 
-    pub const ALL: [Colormap; 2] = [Colormap::Viridis, Colormap::RdBuR];
-
+    pub const ALL: [Colormap; 5] = [
+        Colormap::Viridis,
+        Colormap::RdBuR,
+        Colormap::Plasma,
+        Colormap::Inferno,
+        Colormap::Coolwarm,
+    ];
 }
 
 /// Persistent UI state (stored in GeoScopeApp).
@@ -187,6 +198,7 @@ impl GeoScopeTabViewer<'_> {
 
         // Collect click events to avoid borrow conflict
         let mut load_request: Option<(usize, usize)> = None;
+        let mut close_request: Option<usize> = None;
 
         for (file_idx, file) in self.data_store.files.iter().enumerate() {
             let file_name = std::path::Path::new(&file.path)
@@ -204,6 +216,13 @@ impl GeoScopeTabViewer<'_> {
             egui::CollapsingHeader::new(header_text)
             .default_open(true)
             .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.small_button("×").clicked() {
+                            close_request = Some(file_idx);
+                        }
+                    });
+                });
                 for (var_idx, var) in file.variables.iter().enumerate() {
                     let is_coord = var.dimensions.len() <= 1
                         && var.dimensions.first().is_some_and(|(d, _)| d == &var.name);
@@ -269,6 +288,21 @@ impl GeoScopeTabViewer<'_> {
             self.data_store.active_file = Some(file_idx);
             if self.data_store.load_field(file_idx, var_idx).is_ok() {
                 *self.data_generation += 1;
+            }
+        }
+
+        if let Some(file_idx) = close_request {
+            self.data_store.files.remove(file_idx);
+            // Fix active_file index
+            if self.data_store.files.is_empty() {
+                self.data_store.active_file = None;
+            } else if let Some(active) = self.data_store.active_file {
+                if active == file_idx {
+                    self.data_store.active_file = Some(active.min(self.data_store.files.len() - 1));
+                    *self.data_generation += 1;
+                } else if active > file_idx {
+                    self.data_store.active_file = Some(active - 1);
+                }
             }
         }
     }

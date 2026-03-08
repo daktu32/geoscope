@@ -4,7 +4,7 @@ use egui::epaint;
 use wgpu::util::DeviceExt;
 
 use super::common::{
-    generate_rdbu_r_lut, generate_viridis_lut, identity_mat4, CameraUniform, Vertex,
+    colormap_lut, identity_mat4, CameraUniform, Vertex,
 };
 
 /// Map projection mode.
@@ -254,7 +254,7 @@ impl MapRenderer {
             ..Default::default()
         });
 
-        let colormap_data = generate_viridis_lut();
+        let colormap_data = colormap_lut(crate::ui::Colormap::Viridis);
         let colormap_texture = device.create_texture_with_data(
             &render_state.queue,
             &wgpu::TextureDescriptor {
@@ -518,10 +518,7 @@ impl MapRenderer {
             ..Default::default()
         });
 
-        let colormap_data = match colormap {
-            crate::ui::Colormap::Viridis => generate_viridis_lut(),
-            crate::ui::Colormap::RdBuR => generate_rdbu_r_lut(),
-        };
+        let colormap_data = colormap_lut(colormap);
         let colormap_texture = device.create_texture_with_data(
             queue,
             &wgpu::TextureDescriptor {

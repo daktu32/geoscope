@@ -122,6 +122,39 @@ pub fn generate_rdbu_r_lut() -> Vec<u8> {
     interpolate_lut(&stops)
 }
 
+pub fn generate_plasma_lut() -> Vec<u8> {
+    let stops: [(f32, [u8; 3]); 5] = [
+        (0.0, [13, 8, 135]),
+        (0.25, [126, 3, 168]),
+        (0.5, [204, 71, 120]),
+        (0.75, [248, 149, 64]),
+        (1.0, [240, 249, 33]),
+    ];
+    interpolate_lut(&stops)
+}
+
+pub fn generate_inferno_lut() -> Vec<u8> {
+    let stops: [(f32, [u8; 3]); 5] = [
+        (0.0, [0, 0, 4]),
+        (0.25, [87, 16, 110]),
+        (0.5, [188, 55, 84]),
+        (0.75, [249, 142, 9]),
+        (1.0, [252, 255, 164]),
+    ];
+    interpolate_lut(&stops)
+}
+
+pub fn generate_coolwarm_lut() -> Vec<u8> {
+    let stops: [(f32, [u8; 3]); 5] = [
+        (0.0, [59, 76, 192]),
+        (0.25, [141, 176, 254]),
+        (0.5, [221, 221, 221]),
+        (0.75, [245, 156, 125]),
+        (1.0, [180, 4, 38]),
+    ];
+    interpolate_lut(&stops)
+}
+
 pub fn interpolate_lut(stops: &[(f32, [u8; 3]); 5]) -> Vec<u8> {
     let mut data = Vec::with_capacity(256 * 4);
     for i in 0..256 {
@@ -176,5 +209,8 @@ pub fn colormap_lut(colormap: Colormap) -> Vec<u8> {
     match colormap {
         Colormap::Viridis => generate_viridis_lut(),
         Colormap::RdBuR => generate_rdbu_r_lut(),
+        Colormap::Plasma => generate_plasma_lut(),
+        Colormap::Inferno => generate_inferno_lut(),
+        Colormap::Coolwarm => generate_coolwarm_lut(),
     }
 }
