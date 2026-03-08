@@ -133,6 +133,8 @@ pub struct GeoScopeTabViewer<'a> {
     pub ui_state: &'a mut UiState,
     /// Incremented when field data changes, triggers GPU upload.
     pub data_generation: &'a mut u64,
+    /// Paths requested to open via the UI.
+    pub open_file_request: &'a mut Vec<std::path::PathBuf>,
 }
 
 impl TabViewer for GeoScopeTabViewer<'_> {
@@ -158,14 +160,25 @@ impl TabViewer for GeoScopeTabViewer<'_> {
 impl GeoScopeTabViewer<'_> {
     fn data_browser_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Data").strong().size(14.0));
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("Data").strong().size(14.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button(egui::RichText::new("Open").size(11.0)).clicked() {
+                    let paths = rfd::FileDialog::new()
+                        .add_filter("NetCDF", &["nc", "nc4", "netcdf"])
+                        .pick_files()
+                        .unwrap_or_default();
+                    self.open_file_request.extend(paths);
+                }
+            });
+        });
         ui.add_space(4.0);
 
         if self.data_store.files.is_empty() {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("Drop a .nc file here")
+                    egui::RichText::new("Drop a .nc file here\nor click Open")
                         .color(egui::Color32::from_gray(128)),
                 );
             });
@@ -181,9 +194,14 @@ impl GeoScopeTabViewer<'_> {
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| file.path.clone());
 
-            egui::CollapsingHeader::new(
-                egui::RichText::new(format!("📁 {file_name}")).size(12.0),
-            )
+            let is_active_file = self.data_store.active_file == Some(file_idx);
+            let header_text = if is_active_file {
+                egui::RichText::new(format!("📁 {file_name}")).size(12.0).color(egui::Color32::from_rgb(0, 164, 154))
+            } else {
+                egui::RichText::new(format!("📁 {file_name}")).size(12.0)
+            };
+
+            egui::CollapsingHeader::new(header_text)
             .default_open(true)
             .show(ui, |ui| {
                 for (var_idx, var) in file.variables.iter().enumerate() {
@@ -193,7 +211,7 @@ impl GeoScopeTabViewer<'_> {
                         continue;
                     }
 
-                    let is_selected = file.selected_variable == Some(var_idx);
+                    let is_selected = is_active_file && file.selected_variable == Some(var_idx);
 
                     // Color indicator based on variable type
                     let indicator_color = if is_selected {
@@ -248,6 +266,7 @@ impl GeoScopeTabViewer<'_> {
         }
 
         if let Some((file_idx, var_idx)) = load_request {
+            self.data_store.active_file = Some(file_idx);
             if self.data_store.load_field(file_idx, var_idx).is_ok() {
                 *self.data_generation += 1;
             }

@@ -35,6 +35,8 @@ pub struct GeoScopeApp {
     cross_section_generation: u64,
     vector_generation: u64,
     last_map_projection: crate::renderer::map::MapProjection,
+    /// Pending file open requests from UI.
+    open_file_request: Vec<std::path::PathBuf>,
     /// Cached global (min, max) for the current variable. Reset on variable change.
     global_range_cache: Option<(f32, f32)>,
     /// Variable index used to compute the cached global range.
@@ -70,6 +72,7 @@ impl GeoScopeApp {
             cross_section_generation: 0,
             vector_generation: 0,
             last_map_projection: crate::renderer::map::MapProjection::default(),
+            open_file_request: Vec::new(),
             global_range_cache: None,
             global_range_var: None,
             theme_applied: false,
@@ -250,6 +253,7 @@ impl eframe::App for GeoScopeApp {
             vector_overlay: &mut self.vector_overlay,
             ui_state: &mut self.ui_state,
             data_generation: &mut self.data_generation,
+            open_file_request: &mut self.open_file_request,
         };
 
         // Top bar
@@ -299,6 +303,16 @@ impl eframe::App for GeoScopeApp {
         DockArea::new(&mut self.dock_state)
             .style(dock_style(ctx))
             .show(ctx, &mut tab_viewer);
+
+        // Handle file open requests from UI
+        if !self.open_file_request.is_empty() {
+            let paths: Vec<_> = std::mem::take(&mut self.open_file_request);
+            for path in &paths {
+                if let Err(e) = self.open_file(path) {
+                    self.ui_state.status_text = format!("Error: {e}");
+                }
+            }
+        }
 
         // Detect colormap change
         if self.ui_state.colormap != self.last_colormap {
