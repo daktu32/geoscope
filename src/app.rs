@@ -542,16 +542,18 @@ impl eframe::App for GeoScopeApp {
 
         // Upload field data to GPU when it changes
         if self.data_generation != self.gpu_generation {
-            // Eagerly compute global range for the active variable (cached per variable)
-            if let Some(file_idx) = self.data_store.active_file {
-                if let Some(file) = self.data_store.files.get(file_idx) {
-                    if let Some(var_idx) = file.selected_variable {
-                        let key = (file_idx, var_idx);
-                        if self.global_range_var != Some(key) {
-                            if let Ok((gmin, gmax)) = self.data_store.compute_global_range(file_idx, var_idx) {
-                                self.global_range_cache = Some((gmin, gmax));
-                                self.global_range_var = Some(key);
-                                self.ui_state.global_range = Some((gmin, gmax));
+            // Compute global range on-demand: only when Global mode is active
+            if self.ui_state.range_mode == crate::ui::RangeMode::Global {
+                if let Some(file_idx) = self.data_store.active_file {
+                    if let Some(file) = self.data_store.files.get(file_idx) {
+                        if let Some(var_idx) = file.selected_variable {
+                            let key = (file_idx, var_idx);
+                            if self.global_range_var != Some(key) {
+                                if let Ok((gmin, gmax)) = self.data_store.compute_global_range(file_idx, var_idx) {
+                                    self.global_range_cache = Some((gmin, gmax));
+                                    self.global_range_var = Some(key);
+                                    self.ui_state.global_range = Some((gmin, gmax));
+                                }
                             }
                         }
                     }
