@@ -18,6 +18,23 @@ pub enum ViewMode {
     Hovmoller,
     Spectrum,
     CrossSection,
+    Profile,
+}
+
+/// Hover information for Point Info display.
+#[derive(Debug, Clone)]
+pub struct HoverInfo {
+    pub lon_deg: f32,
+    pub lat_deg: f32,
+    pub value: f32,
+}
+
+/// Profile view mode.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ProfileMode {
+    #[default]
+    Vertical,
+    TimeSeries,
 }
 
 /// Colormap selection.
@@ -113,6 +130,18 @@ pub struct UiState {
     // Export dialog
     pub export_dialog_open: bool,
     pub export_settings: crate::renderer::export::ExportSettings,
+    // Point Info (cursor hover)
+    pub hover_info: Option<HoverInfo>,
+    // Profile view
+    pub profile_point: Option<(usize, usize)>, // (lon_idx, lat_idx)
+    pub profile_mode: ProfileMode,
+    // Zonal Mean
+    pub zonal_mean_enabled: bool,
+    // Contour overlay
+    pub contour_enabled: bool,
+    pub contour_levels: usize,
+    // Streamline overlay
+    pub streamline_enabled: bool,
 }
 
 /// Range mode for colormap scaling.
@@ -153,6 +182,13 @@ impl Default for UiState {
             global_range: None,
             export_dialog_open: false,
             export_settings: crate::renderer::export::ExportSettings::default(),
+            hover_info: None,
+            profile_point: None,
+            profile_mode: ProfileMode::default(),
+            zonal_mean_enabled: false,
+            contour_enabled: false,
+            contour_levels: 10,
+            streamline_enabled: false,
         }
     }
 }
@@ -356,6 +392,104 @@ impl GeoScopeTabViewer<'_> {
     }
 
     fn viewport_ui(&mut self, ui: &mut egui::Ui) {
+        // --- Keyboard shortcuts ---
+        let ctx = ui.ctx().clone();
+        ctx.input(|i| {
+            // Space: toggle play/pause
+            if i.key_pressed(egui::Key::Space) {
+                self.ui_state.playing = !self.ui_state.playing;
+                self.ui_state.play_accumulator = 0.0;
+            }
+            // Left/Right arrows: step time
+            if let Some(time_len) = self.active_time_dim_len() {
+                if time_len > 1 {
+                    if i.key_pressed(egui::Key::ArrowRight) {
+                        let new_t = (self.ui_state.time_index + 1) % time_len;
+                        self.ui_state.time_index = new_t;
+                        self.ui_state.playing = false;
+                        if let Some(fi) = self.data_store.active_file {
+                            if let Some(file) = self.data_store.files.get(fi) {
+                                if let Some(vi) = file.selected_variable {
+                                    if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
+                                        *self.data_generation += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if i.key_pressed(egui::Key::ArrowLeft) {
+                        let new_t = if self.ui_state.time_index == 0 { time_len - 1 } else { self.ui_state.time_index - 1 };
+                        self.ui_state.time_index = new_t;
+                        self.ui_state.playing = false;
+                        if let Some(fi) = self.data_store.active_file {
+                            if let Some(file) = self.data_store.files.get(fi) {
+                                if let Some(vi) = file.selected_variable {
+                                    if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
+                                        *self.data_generation += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // Up/Down arrows: step level
+            if let Some((_, level_size)) = self.active_level_dim() {
+                if level_size > 1 {
+                    if i.key_pressed(egui::Key::ArrowUp) {
+                        let new_lev = if self.ui_state.level_index == 0 { 0 } else { self.ui_state.level_index - 1 };
+                        if new_lev != self.ui_state.level_index {
+                            self.ui_state.level_index = new_lev;
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        if self.data_store.load_field_at(fi, vi, self.ui_state.time_index, new_lev).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if i.key_pressed(egui::Key::ArrowDown) {
+                        let new_lev = (self.ui_state.level_index + 1).min(level_size - 1);
+                        if new_lev != self.ui_state.level_index {
+                            self.ui_state.level_index = new_lev;
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        if self.data_store.load_field_at(fi, vi, self.ui_state.time_index, new_lev).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            // 1-6: switch view mode
+            if i.key_pressed(egui::Key::Num1) { self.ui_state.view_mode = ViewMode::Globe; }
+            if i.key_pressed(egui::Key::Num2) { self.ui_state.view_mode = ViewMode::Map; }
+            if i.key_pressed(egui::Key::Num3) { self.ui_state.view_mode = ViewMode::Hovmoller; }
+            if i.key_pressed(egui::Key::Num4) { self.ui_state.view_mode = ViewMode::Spectrum; }
+            if i.key_pressed(egui::Key::Num5) { self.ui_state.view_mode = ViewMode::Profile; }
+            if i.key_pressed(egui::Key::Num6) { self.ui_state.view_mode = ViewMode::CrossSection; }
+            // G: toggle grid/smooth
+            if i.key_pressed(egui::Key::G) {
+                self.ui_state.interpolated = !self.ui_state.interpolated;
+                *self.data_generation += 1;
+            }
+            // C: toggle contour
+            if i.key_pressed(egui::Key::C) {
+                self.ui_state.contour_enabled = !self.ui_state.contour_enabled;
+            }
+            // V: toggle vector/streamline
+            if i.key_pressed(egui::Key::V) {
+                self.ui_state.streamline_enabled = !self.ui_state.streamline_enabled;
+            }
+        });
+
         // Auto-play logic (runs before layout)
         if let Some(time_len) = self.active_time_dim_len() {
             if time_len > 1 && self.ui_state.playing {
@@ -388,13 +522,14 @@ impl GeoScopeTabViewer<'_> {
             .frame(egui::Frame::NONE.fill(crate::app::BG_DARK).inner_margin(egui::Margin::symmetric(8, 4)))
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
-                    for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum, ViewMode::CrossSection] {
+                    for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum, ViewMode::CrossSection, ViewMode::Profile] {
                         let label = match mode {
                             ViewMode::Globe => "🌐 Globe",
                             ViewMode::Map => "Map",
                             ViewMode::Hovmoller => "Hovmoller",
                             ViewMode::Spectrum => "Spectrum",
                             ViewMode::CrossSection => "Section",
+                            ViewMode::Profile => "Profile",
                         };
                         let is_active = self.ui_state.view_mode == mode;
                         let text = egui::RichText::new(label).size(12.0).color(
@@ -537,6 +672,7 @@ impl GeoScopeTabViewer<'_> {
                         &view_proj,
                     );
                 }
+                self.ui_state.hover_info = None;
             }
             ViewMode::Map => {
                 self.map_renderer.paint(&mut child_ui);
@@ -549,11 +685,100 @@ impl GeoScopeTabViewer<'_> {
                         self.map_renderer.zoom,
                     );
                 }
+                // Map hover → Point Info (Equirectangular only)
+                if self.map_renderer.projection == MapProjection::Equirectangular {
+                    let hover_pos = child_ui.input(|i| i.pointer.hover_pos());
+                    if let Some(pos) = hover_pos {
+                        if central.contains(pos) {
+                            // Screen → NDC (account for pan/zoom via inverse ortho)
+                            let aspect = central.width() / central.height().max(1.0);
+                            let (sx, sy) = if aspect > 1.0 {
+                                (self.map_renderer.zoom / aspect, self.map_renderer.zoom)
+                            } else {
+                                (self.map_renderer.zoom, self.map_renderer.zoom * aspect)
+                            };
+                            // Screen pos → normalized [-1,1] in rect
+                            let nx = (pos.x - central.center().x) / (central.width() * 0.5);
+                            let ny = -(pos.y - central.center().y) / (central.height() * 0.5);
+                            // Inverse ortho transform → world coords
+                            let wx = (nx + self.map_renderer.pan_x * sx) / sx;
+                            let wy = (ny + self.map_renderer.pan_y * sy) / sy;
+                            // World [-1,1] → UV [0,1]
+                            let u = (wx + 1.0) * 0.5;
+                            let v = (1.0 - wy) * 0.5;
+                            if (0.0..=1.0).contains(&u) && (0.0..=1.0).contains(&v) {
+                                let lon_deg = u * 360.0 - 180.0;
+                                let lat_deg = 90.0 - v * 180.0;
+                                // Look up data value at nearest grid point
+                                let value = self.data_store.active_field().map(|field| {
+                                    let gx = ((u * field.width as f32) as usize).min(field.width - 1);
+                                    let gy = ((v * field.height as f32) as usize).min(field.height - 1);
+                                    field.values[gy * field.width + gx]
+                                });
+                                if let Some(val) = value {
+                                    self.ui_state.hover_info = Some(HoverInfo {
+                                        lon_deg,
+                                        lat_deg,
+                                        value: val,
+                                    });
+                                }
+                            } else {
+                                self.ui_state.hover_info = None;
+                            }
+                        } else {
+                            self.ui_state.hover_info = None;
+                        }
+                    } else {
+                        self.ui_state.hover_info = None;
+                    }
+                } else {
+                    self.ui_state.hover_info = None;
+                }
             }
             ViewMode::Hovmoller => self.hovmoller_renderer.paint(&mut child_ui),
             ViewMode::Spectrum => self.spectrum_renderer.paint(&mut child_ui),
             ViewMode::CrossSection => self.cross_section_renderer.paint(&mut child_ui),
+            ViewMode::Profile => {
+                // TODO: profile_renderer.paint()
+                child_ui.centered_and_justified(|ui| {
+                    ui.label(egui::RichText::new("Profile view — click a point on Globe/Map to select").color(crate::app::TEXT_CAPTION));
+                });
+            }
         }
+        // Hover info overlay (bottom-left of viewport)
+        if let Some(ref info) = self.ui_state.hover_info {
+            let lon_label = if info.lon_deg >= 0.0 {
+                format!("{:.1}\u{00b0}E", info.lon_deg)
+            } else {
+                format!("{:.1}\u{00b0}W", -info.lon_deg)
+            };
+            let lat_label = if info.lat_deg >= 0.0 {
+                format!("{:.1}\u{00b0}N", info.lat_deg)
+            } else {
+                format!("{:.1}\u{00b0}S", -info.lat_deg)
+            };
+            let text = format!("{}, {}  Value: {:.4e}", lon_label, lat_label, info.value);
+            let font = egui::FontId::monospace(11.0);
+            let painter = ui.painter();
+            let galley = painter.layout_no_wrap(text, font, crate::app::TEXT_BODY);
+            let text_size = galley.size();
+            let margin = 6.0;
+            let pill_rect = egui::Rect::from_min_size(
+                egui::pos2(central.left() + 8.0, central.bottom() - text_size.y - margin * 2.0 - 8.0),
+                egui::vec2(text_size.x + margin * 2.0, text_size.y + margin * 2.0),
+            );
+            painter.rect_filled(
+                pill_rect,
+                4.0,
+                egui::Color32::from_rgba_unmultiplied(15, 15, 23, 200),
+            );
+            painter.galley(
+                egui::pos2(pill_rect.left() + margin, pill_rect.top() + margin),
+                galley,
+                crate::app::TEXT_BODY,
+            );
+        }
+
         ui.allocate_rect(central, egui::Sense::hover());
     }
 
@@ -644,11 +869,15 @@ impl GeoScopeTabViewer<'_> {
                             .selected_text(match self.ui_state.map_projection {
                                 MapProjection::Equirectangular => "Equirectangular",
                                 MapProjection::Mollweide => "Mollweide",
+                                MapProjection::PolarNorth => "Polar (North)",
+                                MapProjection::PolarSouth => "Polar (South)",
                             })
                             .width(ui.available_width() - 8.0)
                             .show_ui(ui, |ui| {
                                 ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Equirectangular, "Equirectangular");
                                 ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Mollweide, "Mollweide");
+                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarNorth, "Polar (North)");
+                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarSouth, "Polar (South)");
                             });
                     } else {
                         let proj_label = match self.ui_state.view_mode {
@@ -656,6 +885,7 @@ impl GeoScopeTabViewer<'_> {
                             ViewMode::Hovmoller => "Time-Longitude",
                             ViewMode::Spectrum => "Log-Log",
                             ViewMode::CrossSection => "Level-Space",
+                            ViewMode::Profile => "Line Graph",
                             ViewMode::Map => unreachable!(),
                         };
                         egui::ComboBox::from_id_salt("projection_combo_main")

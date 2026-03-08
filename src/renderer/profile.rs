@@ -65,107 +65,14 @@ impl ProfileRenderer {
             return;
         }
 
-        let painter = ui.painter();
         let n = data.values.len();
         let range = data.max - data.min;
-
-        // --- Title ---
-        if !self.title.is_empty() {
-            painter.text(
-                egui::pos2(plot.center().x, rect.top() + 8.0),
-                egui::Align2::CENTER_TOP,
-                &self.title,
-                egui::FontId::monospace(11.0),
-                crate::app::TEXT_HEADING,
-            );
-        }
-
-        // --- Axes ---
-        let axis_color = crate::app::TEXT_CAPTION;
-        let axis_stroke = egui::Stroke::new(1.0, axis_color);
-        painter.line_segment([plot.left_bottom(), plot.right_bottom()], axis_stroke);
-        painter.line_segment([plot.left_bottom(), plot.left_top()], axis_stroke);
-
-        // --- X-axis ticks (axis_values) ---
-        let x_tick_count = compute_tick_count(n, 7);
-        let tick_font = egui::FontId::monospace(9.0);
 
         let axis_min = data.axis_values.first().copied().unwrap_or(0.0);
         let axis_max = data.axis_values.last().copied().unwrap_or(1.0);
         let axis_range = axis_max - axis_min;
 
-        for i in 0..x_tick_count {
-            let frac = i as f32 / (x_tick_count - 1).max(1) as f32;
-            let x = plot.left() + frac * plot.width();
-            let val = axis_min + frac as f64 * axis_range;
-
-            // Tick mark
-            painter.line_segment(
-                [egui::pos2(x, plot.bottom()), egui::pos2(x, plot.bottom() + 3.0)],
-                axis_stroke,
-            );
-            // Label
-            painter.text(
-                egui::pos2(x, plot.bottom() + 5.0),
-                egui::Align2::CENTER_TOP,
-                format_tick_value(val),
-                tick_font.clone(),
-                axis_color,
-            );
-        }
-
-        // X-axis label
-        painter.text(
-            egui::pos2(plot.center().x, rect.bottom() - 4.0),
-            egui::Align2::CENTER_BOTTOM,
-            &data.axis_label,
-            egui::FontId::monospace(10.0),
-            crate::app::TEXT_SECONDARY,
-        );
-
-        // --- Y-axis ticks (value range) ---
-        let y_tick_count = compute_tick_count(n, 6);
-
-        for i in 0..y_tick_count {
-            let frac = i as f32 / (y_tick_count - 1).max(1) as f32;
-            let y = plot.bottom() - frac * plot.height();
-            let val = data.min as f64 + frac as f64 * range as f64;
-
-            // Tick mark
-            painter.line_segment(
-                [egui::pos2(plot.left() - 3.0, y), egui::pos2(plot.left(), y)],
-                axis_stroke,
-            );
-            // Label
-            painter.text(
-                egui::pos2(plot.left() - 5.0, y),
-                egui::Align2::RIGHT_CENTER,
-                format_tick_value(val),
-                tick_font.clone(),
-                axis_color,
-            );
-
-            // Grid line (subtle)
-            if i > 0 && i < y_tick_count - 1 {
-                let grid_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
-                painter.line_segment(
-                    [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-                    egui::Stroke::new(0.5, grid_color),
-                );
-            }
-        }
-
-        // Y-axis label (rotated text not supported, use horizontal)
-        painter.text(
-            egui::pos2(rect.left() + 4.0, plot.center().y),
-            egui::Align2::LEFT_CENTER,
-            &data.value_label,
-            egui::FontId::monospace(10.0),
-            crate::app::TEXT_SECONDARY,
-        );
-
-        // --- Data line and markers ---
-        // Compute points before hover interaction to avoid borrow conflicts
+        // Compute points for the data line
         let points: Option<Vec<egui::Pos2>> = if n >= 2 && range.abs() > 1e-20 {
             Some(
                 (0..n)
@@ -187,21 +94,109 @@ impl ProfileRenderer {
             None
         };
 
-        if let Some(ref points) = points {
-            let line_color = crate::app::PRIMARY;
+        // Draw axes, labels, data line using a scoped painter borrow
+        {
+            let painter = ui.painter();
 
-            // Draw line segments
-            for w in points.windows(2) {
-                painter.line_segment([w[0], w[1]], egui::Stroke::new(1.5, line_color));
+            // --- Title ---
+            if !self.title.is_empty() {
+                painter.text(
+                    egui::pos2(plot.center().x, rect.top() + 8.0),
+                    egui::Align2::CENTER_TOP,
+                    &self.title,
+                    egui::FontId::monospace(11.0),
+                    crate::app::TEXT_HEADING,
+                );
             }
 
-            // Draw data point markers
-            for &pt in points {
-                painter.circle_filled(pt, 2.0, line_color);
-            }
-        }
+            // --- Axes ---
+            let axis_color = crate::app::TEXT_CAPTION;
+            let axis_stroke = egui::Stroke::new(1.0, axis_color);
+            painter.line_segment([plot.left_bottom(), plot.right_bottom()], axis_stroke);
+            painter.line_segment([plot.left_bottom(), plot.left_top()], axis_stroke);
 
-        // Allocate rect for hover sensing (must happen before further painter usage for crosshair)
+            // --- X-axis ticks (axis_values) ---
+            let x_tick_count = compute_tick_count(n, 7);
+            let tick_font = egui::FontId::monospace(9.0);
+
+            for i in 0..x_tick_count {
+                let frac = i as f32 / (x_tick_count - 1).max(1) as f32;
+                let x = plot.left() + frac * plot.width();
+                let val = axis_min + frac as f64 * axis_range;
+
+                painter.line_segment(
+                    [egui::pos2(x, plot.bottom()), egui::pos2(x, plot.bottom() + 3.0)],
+                    axis_stroke,
+                );
+                painter.text(
+                    egui::pos2(x, plot.bottom() + 5.0),
+                    egui::Align2::CENTER_TOP,
+                    format_tick_value(val),
+                    tick_font.clone(),
+                    axis_color,
+                );
+            }
+
+            // X-axis label
+            painter.text(
+                egui::pos2(plot.center().x, rect.bottom() - 4.0),
+                egui::Align2::CENTER_BOTTOM,
+                &data.axis_label,
+                egui::FontId::monospace(10.0),
+                crate::app::TEXT_SECONDARY,
+            );
+
+            // --- Y-axis ticks (value range) ---
+            let y_tick_count = compute_tick_count(n, 6);
+
+            for i in 0..y_tick_count {
+                let frac = i as f32 / (y_tick_count - 1).max(1) as f32;
+                let y = plot.bottom() - frac * plot.height();
+                let val = data.min as f64 + frac as f64 * range as f64;
+
+                painter.line_segment(
+                    [egui::pos2(plot.left() - 3.0, y), egui::pos2(plot.left(), y)],
+                    axis_stroke,
+                );
+                painter.text(
+                    egui::pos2(plot.left() - 5.0, y),
+                    egui::Align2::RIGHT_CENTER,
+                    format_tick_value(val),
+                    tick_font.clone(),
+                    axis_color,
+                );
+
+                if i > 0 && i < y_tick_count - 1 {
+                    let grid_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
+                    painter.line_segment(
+                        [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                        egui::Stroke::new(0.5, grid_color),
+                    );
+                }
+            }
+
+            // Y-axis label
+            painter.text(
+                egui::pos2(rect.left() + 4.0, plot.center().y),
+                egui::Align2::LEFT_CENTER,
+                &data.value_label,
+                egui::FontId::monospace(10.0),
+                crate::app::TEXT_SECONDARY,
+            );
+
+            // --- Data line and markers ---
+            if let Some(ref points) = points {
+                let line_color = crate::app::PRIMARY;
+                for w in points.windows(2) {
+                    painter.line_segment([w[0], w[1]], egui::Stroke::new(1.5, line_color));
+                }
+                for &pt in points {
+                    painter.circle_filled(pt, 2.0, line_color);
+                }
+            }
+        } // painter borrow ends here
+
+        // Allocate rect for hover sensing
         let response = ui.allocate_rect(rect, egui::Sense::hover());
 
         // --- Hover crosshair ---
