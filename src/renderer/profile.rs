@@ -7,6 +7,8 @@ pub struct ProfileRenderer {
     data: Option<ProfileData>,
     /// Title text displayed above the plot (e.g., variable name + coordinates).
     title: String,
+    /// Current time/level index to highlight on the plot (playhead marker).
+    current_index: Option<usize>,
 }
 
 impl ProfileRenderer {
@@ -14,6 +16,7 @@ impl ProfileRenderer {
         Self {
             data: None,
             title: String::new(),
+            current_index: None,
         }
     }
 
@@ -25,9 +28,14 @@ impl ProfileRenderer {
         self.title = title;
     }
 
+    pub fn set_current_index(&mut self, index: Option<usize>) {
+        self.current_index = index;
+    }
+
     pub fn clear(&mut self) {
         self.data = None;
         self.title.clear();
+        self.current_index = None;
     }
 
     pub fn has_data(&self) -> bool {
@@ -192,6 +200,43 @@ impl ProfileRenderer {
                 }
                 for &pt in points {
                     painter.circle_filled(pt, 2.0, line_color);
+                }
+            }
+
+            // --- Playhead: current time/level marker ---
+            if let (Some(points), Some(idx)) = (&points, self.current_index) {
+                if idx < points.len() && idx < data.values.len() {
+                    let pt = points[idx];
+                    let val = data.values[idx];
+
+                    // Vertical line (full height, semi-transparent)
+                    let playhead_color = egui::Color32::from_rgba_premultiplied(255, 200, 60, 140);
+                    painter.line_segment(
+                        [egui::pos2(pt.x, plot.top()), egui::pos2(pt.x, plot.bottom())],
+                        egui::Stroke::new(1.0, playhead_color),
+                    );
+
+                    // Highlighted dot
+                    painter.circle_filled(pt, 5.0, playhead_color);
+                    painter.circle_stroke(pt, 5.0, egui::Stroke::new(1.0, egui::Color32::WHITE));
+
+                    // Value label near the dot
+                    let label = format_tick_value(val as f64);
+                    let label_offset = if pt.y - plot.top() > 30.0 {
+                        egui::vec2(8.0, -16.0) // above
+                    } else {
+                        egui::vec2(8.0, 10.0)  // below
+                    };
+                    let label_pos = pt + label_offset;
+                    let label_font = egui::FontId::monospace(10.0);
+                    let galley = painter.layout_no_wrap(
+                        label.clone(),
+                        label_font,
+                        crate::app::TEXT_HEADING,
+                    );
+                    let bg = egui::Rect::from_min_size(label_pos, galley.size()).expand(3.0);
+                    painter.rect_filled(bg, 2.0, egui::Color32::from_rgba_unmultiplied(15, 15, 23, 210));
+                    painter.galley(label_pos, galley, crate::app::TEXT_HEADING);
                 }
             }
         } // painter borrow ends here

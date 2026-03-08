@@ -761,6 +761,11 @@ impl eframe::App for GeoScopeApp {
             self.profile_generation = self.data_generation;
         }
 
+        // Sync profile playhead with current time index (every frame, cheap)
+        if self.ui_state.view_mode == crate::ui::ViewMode::Profile {
+            self.profile_renderer.set_current_index(Some(self.ui_state.time_index));
+        }
+
         // Contour overlay data update
         if self.ui_state.contour_enabled && self.contour_generation != self.data_generation {
             if let Some(field) = self.data_store.active_field().cloned() {
