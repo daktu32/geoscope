@@ -9,6 +9,9 @@ use crate::renderer::MapRenderer;
 use crate::renderer::cross_section::CrossSectionRenderer;
 use crate::renderer::hovmoller::HovmollerRenderer;
 use crate::renderer::spectrum::SpectrumRenderer;
+use crate::renderer::contour::ContourOverlay;
+use crate::renderer::profile::ProfileRenderer;
+use crate::renderer::streamline::StreamlineOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
 use crate::ui::{Colormap, GeoScopeTabViewer, Tab};
 
@@ -56,6 +59,9 @@ pub struct GeoScopeApp {
     spectrum_renderer: SpectrumRenderer,
     cross_section_renderer: CrossSectionRenderer,
     vector_overlay: VectorOverlay,
+    profile_renderer: ProfileRenderer,
+    contour_overlay: ContourOverlay,
+    streamline_overlay: StreamlineOverlay,
     ui_state: crate::ui::UiState,
     data_generation: u64,
     gpu_generation: u64,
@@ -63,6 +69,9 @@ pub struct GeoScopeApp {
     hovmoller_generation: u64,
     cross_section_generation: u64,
     vector_generation: u64,
+    profile_generation: u64,
+    contour_generation: u64,
+    streamline_generation: u64,
     last_map_projection: crate::renderer::map::MapProjection,
     /// Pending file open requests from UI.
     open_file_request: Vec<std::path::PathBuf>,
@@ -95,6 +104,9 @@ impl GeoScopeApp {
             spectrum_renderer: SpectrumRenderer::new(),
             cross_section_renderer: CrossSectionRenderer::new(),
             vector_overlay: VectorOverlay::new(),
+            profile_renderer: ProfileRenderer::new(),
+            contour_overlay: ContourOverlay::new(),
+            streamline_overlay: StreamlineOverlay::new(),
             ui_state: crate::ui::UiState::default(),
             data_generation: 0,
             gpu_generation: 0,
@@ -102,6 +114,9 @@ impl GeoScopeApp {
             hovmoller_generation: 0,
             cross_section_generation: 0,
             vector_generation: 0,
+            profile_generation: 0,
+            contour_generation: 0,
+            streamline_generation: 0,
             last_map_projection: crate::renderer::map::MapProjection::default(),
             open_file_request: Vec::new(),
             global_range_cache: None,
@@ -294,6 +309,9 @@ impl eframe::App for GeoScopeApp {
             spectrum_renderer: &mut self.spectrum_renderer,
             cross_section_renderer: &mut self.cross_section_renderer,
             vector_overlay: &mut self.vector_overlay,
+            profile_renderer: &mut self.profile_renderer,
+            contour_overlay: &mut self.contour_overlay,
+            streamline_overlay: &mut self.streamline_overlay,
             ui_state: &mut self.ui_state,
             data_generation: &mut self.data_generation,
             open_file_request: &mut self.open_file_request,
@@ -699,5 +717,80 @@ impl eframe::App for GeoScopeApp {
         // Sync vector overlay density/scale from UI
         self.vector_overlay.density = self.ui_state.vector_density;
         self.vector_overlay.scale = self.ui_state.vector_scale;
+
+        // Profile data loading
+        if self.ui_state.view_mode == crate::ui::ViewMode::Profile
+            && self.profile_generation != self.data_generation
+        {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let Some(file) = self.data_store.files.get(file_idx) {
+                    if let Some(var_idx) = file.selected_variable {
+                        if let Some(ref field) = file.field_data {
+                            let lon_idx = field.width / 2;
+                            let lat_idx = field.height / 2;
+                            let time_idx = self.ui_state.time_index;
+                            if let Some(profile) = self.data_store.load_profile_data(
+                                file_idx, var_idx, time_idx, lon_idx, lat_idx,
+                            ) {
+                                let var_name = file.variables[var_idx].name.clone();
+                                self.profile_renderer.set_title(format!(
+                                    "{} (lon={}, lat={})", var_name, lon_idx, lat_idx
+                                ));
+                                self.profile_renderer.set_data(profile);
+                            } else {
+                                // Fall back to time series
+                                let level_idx = self.ui_state.level_index;
+                                if let Some(ts) = self.data_store.load_time_series_data(
+                                    file_idx, var_idx, level_idx, lon_idx, lat_idx,
+                                ) {
+                                    let var_name = file.variables[var_idx].name.clone();
+                                    self.profile_renderer.set_title(format!(
+                                        "{} time series (lon={}, lat={})", var_name, lon_idx, lat_idx
+                                    ));
+                                    self.profile_renderer.set_data(ts);
+                                } else {
+                                    self.profile_renderer.clear();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            self.profile_generation = self.data_generation;
+        }
+
+        // Contour overlay data update
+        if self.ui_state.contour_enabled && self.contour_generation != self.data_generation {
+            if let Some(field) = self.data_store.active_field().cloned() {
+                self.contour_overlay.update_data(&field, self.ui_state.contour_levels);
+            }
+            self.contour_generation = self.data_generation;
+        } else if !self.ui_state.contour_enabled {
+            self.contour_overlay.clear();
+        }
+
+        // Streamline overlay data update
+        if self.ui_state.streamline_enabled && self.streamline_generation != self.data_generation {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let (Some(u_idx), Some(v_idx)) = (self.ui_state.vector_u_var, self.ui_state.vector_v_var) {
+                    let orig_var = self.data_store.files[file_idx].selected_variable;
+                    let orig_field = self.data_store.files[file_idx].field_data.clone();
+
+                    let time_idx = self.ui_state.time_index;
+                    let level_idx = self.ui_state.level_index;
+                    if let Ok(vec_data) = self.data_store.load_vector_field(
+                        file_idx, u_idx, v_idx, time_idx, level_idx,
+                    ) {
+                        self.streamline_overlay.set_data(vec_data);
+                    }
+
+                    self.data_store.files[file_idx].selected_variable = orig_var;
+                    self.data_store.files[file_idx].field_data = orig_field;
+                }
+            }
+            self.streamline_generation = self.data_generation;
+        } else if !self.ui_state.streamline_enabled && self.streamline_overlay.has_data() {
+            self.streamline_overlay.clear();
+        }
     }
 }

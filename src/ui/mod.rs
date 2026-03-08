@@ -7,6 +7,9 @@ use crate::renderer::cross_section::CrossSectionRenderer;
 use crate::renderer::hovmoller::HovmollerRenderer;
 use crate::renderer::map::MapProjection;
 use crate::renderer::spectrum::SpectrumRenderer;
+use crate::renderer::contour::ContourOverlay;
+use crate::renderer::profile::ProfileRenderer;
+use crate::renderer::streamline::StreamlineOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
 
 /// View mode for the viewport.
@@ -210,6 +213,9 @@ pub struct GeoScopeTabViewer<'a> {
     pub spectrum_renderer: &'a mut SpectrumRenderer,
     pub cross_section_renderer: &'a mut CrossSectionRenderer,
     pub vector_overlay: &'a mut VectorOverlay,
+    pub profile_renderer: &'a mut ProfileRenderer,
+    pub contour_overlay: &'a mut ContourOverlay,
+    pub streamline_overlay: &'a mut StreamlineOverlay,
     pub ui_state: &'a mut UiState,
     /// Incremented when field data changes, triggers GPU upload.
     pub data_generation: &'a mut u64,
@@ -651,14 +657,14 @@ impl GeoScopeTabViewer<'_> {
         match self.ui_state.view_mode {
             ViewMode::Globe => {
                 self.globe_renderer.paint(&mut child_ui);
-                if self.ui_state.vector_overlay_enabled {
-                    // Must use the same padded rect as GlobeRenderer::paint()
-                    let avail = central.size();
-                    let pad_x = (avail.x * 0.05).max(8.0);
-                    let pad_y = (avail.y * 0.05).max(8.0);
-                    let padded = egui::vec2(avail.x - pad_x * 2.0, avail.y - pad_y * 2.0);
-                    let globe_rect = egui::Rect::from_center_size(central.center(), padded);
+                // Overlays on Globe
+                let avail = central.size();
+                let pad_x = (avail.x * 0.05).max(8.0);
+                let pad_y = (avail.y * 0.05).max(8.0);
+                let padded = egui::vec2(avail.x - pad_x * 2.0, avail.y - pad_y * 2.0);
+                let globe_rect = egui::Rect::from_center_size(central.center(), padded);
 
+                if self.ui_state.vector_overlay_enabled {
                     let (view, view_proj) = crate::renderer::common::build_view_proj(
                         self.globe_renderer.cam_lon,
                         self.globe_renderer.cam_lat,
@@ -672,12 +678,39 @@ impl GeoScopeTabViewer<'_> {
                         &view_proj,
                     );
                 }
+                if self.ui_state.contour_enabled {
+                    self.contour_overlay.paint_on_globe(
+                        child_ui.painter(),
+                        globe_rect,
+                        self.globe_renderer.cam_lon,
+                        self.globe_renderer.cam_lat,
+                        self.globe_renderer.zoom,
+                    );
+                }
                 self.ui_state.hover_info = None;
             }
             ViewMode::Map => {
                 self.map_renderer.paint(&mut child_ui);
                 if self.ui_state.vector_overlay_enabled {
                     self.vector_overlay.paint_on_map(
+                        child_ui.painter(),
+                        central,
+                        self.map_renderer.pan_x,
+                        self.map_renderer.pan_y,
+                        self.map_renderer.zoom,
+                    );
+                }
+                if self.ui_state.contour_enabled {
+                    self.contour_overlay.paint_on_map(
+                        child_ui.painter(),
+                        central,
+                        self.map_renderer.pan_x,
+                        self.map_renderer.pan_y,
+                        self.map_renderer.zoom,
+                    );
+                }
+                if self.ui_state.streamline_enabled {
+                    self.streamline_overlay.paint_on_map(
                         child_ui.painter(),
                         central,
                         self.map_renderer.pan_x,
@@ -739,10 +772,7 @@ impl GeoScopeTabViewer<'_> {
             ViewMode::Spectrum => self.spectrum_renderer.paint(&mut child_ui),
             ViewMode::CrossSection => self.cross_section_renderer.paint(&mut child_ui),
             ViewMode::Profile => {
-                // TODO: profile_renderer.paint()
-                child_ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new("Profile view — click a point on Globe/Map to select").color(crate::app::TEXT_CAPTION));
-                });
+                self.profile_renderer.paint(&mut child_ui);
             }
         }
         // Hover info overlay (bottom-left of viewport)
@@ -1143,6 +1173,40 @@ impl GeoScopeTabViewer<'_> {
                             let mut scale = self.ui_state.vector_scale;
                             if ui.add(egui::Slider::new(&mut scale, 0.1..=5.0).text("Scale")).changed() {
                                 self.ui_state.vector_scale = scale;
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                    }
+
+                    // Contour overlay (Globe/Map views)
+                    if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
+                        Self::section_header(ui, "Contour Lines");
+                        ui.add_space(3.0);
+                        ui.checkbox(&mut self.ui_state.contour_enabled, egui::RichText::new("Enabled").size(11.0));
+                        if self.ui_state.contour_enabled {
+                            let mut levels = self.ui_state.contour_levels;
+                            if ui.add(egui::Slider::new(&mut levels, 3..=30).text("Levels")).changed() {
+                                self.ui_state.contour_levels = levels;
+                            }
+                        }
+                        ui.add_space(6.0);
+                        ui.separator();
+                        ui.add_space(6.0);
+                    }
+
+                    // Streamline overlay (Map view only for now)
+                    if self.ui_state.view_mode == ViewMode::Map {
+                        Self::section_header(ui, "Streamlines");
+                        ui.add_space(3.0);
+                        ui.checkbox(&mut self.ui_state.streamline_enabled, egui::RichText::new("Enabled").size(11.0));
+                        if self.ui_state.streamline_enabled {
+                            if self.ui_state.vector_u_var.is_none() {
+                                if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
+                                    self.ui_state.vector_u_var = Some(u_idx);
+                                    self.ui_state.vector_v_var = Some(v_idx);
+                                }
                             }
                         }
                         ui.add_space(6.0);
