@@ -23,32 +23,54 @@ pub enum ViewMode {
 /// Colormap selection.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum Colormap {
+    // Sequential
     #[default]
     Viridis,
-    RdBuR,
     Plasma,
     Inferno,
+    Magma,
+    Cividis,
+    Turbo,
+    // Diverging
+    RdBuR,
     Coolwarm,
+    Spectral,
+    BrBG,
 }
 
 impl Colormap {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Viridis => "viridis",
+            Self::Viridis => "Viridis",
+            Self::Plasma => "Plasma",
+            Self::Inferno => "Inferno",
+            Self::Magma => "Magma",
+            Self::Cividis => "Cividis",
+            Self::Turbo => "Turbo",
             Self::RdBuR => "RdBu_r",
-            Self::Plasma => "plasma",
-            Self::Inferno => "inferno",
-            Self::Coolwarm => "coolwarm",
+            Self::Coolwarm => "Coolwarm",
+            Self::Spectral => "Spectral",
+            Self::BrBG => "BrBG",
         }
     }
 
-    pub const ALL: [Colormap; 5] = [
-        Colormap::Viridis,
-        Colormap::RdBuR,
-        Colormap::Plasma,
-        Colormap::Inferno,
-        Colormap::Coolwarm,
+    pub fn category(&self) -> &'static str {
+        match self {
+            Self::Viridis | Self::Plasma | Self::Inferno
+            | Self::Magma | Self::Cividis | Self::Turbo => "Sequential",
+            Self::RdBuR | Self::Coolwarm | Self::Spectral | Self::BrBG => "Diverging",
+        }
+    }
+
+    pub const SEQUENTIAL: [Colormap; 6] = [
+        Colormap::Viridis, Colormap::Plasma, Colormap::Inferno,
+        Colormap::Magma, Colormap::Cividis, Colormap::Turbo,
     ];
+
+    pub const DIVERGING: [Colormap; 4] = [
+        Colormap::RdBuR, Colormap::Coolwarm, Colormap::Spectral, Colormap::BrBG,
+    ];
+
 }
 
 /// Persistent UI state (stored in GeoScopeApp).
@@ -82,6 +104,9 @@ pub struct UiState {
     pub manual_max: f32,
     /// Cached global range (computed in app.rs, displayed in Inspector)
     pub global_range: Option<(f32, f32)>,
+    // Export dialog
+    pub export_dialog_open: bool,
+    pub export_settings: crate::renderer::export::ExportSettings,
 }
 
 /// Range mode for colormap scaling.
@@ -120,6 +145,8 @@ impl Default for UiState {
             manual_min: 0.0,
             manual_max: 1.0,
             global_range: None,
+            export_dialog_open: false,
+            export_settings: crate::renderer::export::ExportSettings::default(),
         }
     }
 }
@@ -532,10 +559,20 @@ impl GeoScopeTabViewer<'_> {
                     ui.label(egui::RichText::new("Colormap").size(11.0).color(egui::Color32::from_gray(160)));
                     ui.add_space(2.0);
                     egui::ComboBox::from_id_salt("colormap_combo")
-                        .selected_text(self.ui_state.colormap.label())
+                        .selected_text(format!("{} ({})", self.ui_state.colormap.label(), self.ui_state.colormap.category()))
                         .width(ui.available_width() - 8.0)
                         .show_ui(ui, |ui| {
-                            for cm in Colormap::ALL {
+                            ui.label(egui::RichText::new("Sequential").size(10.0).color(egui::Color32::from_gray(120)));
+                            for cm in Colormap::SEQUENTIAL {
+                                ui.selectable_value(
+                                    &mut self.ui_state.colormap,
+                                    cm,
+                                    cm.label(),
+                                );
+                            }
+                            ui.separator();
+                            ui.label(egui::RichText::new("Diverging").size(10.0).color(egui::Color32::from_gray(120)));
+                            for cm in Colormap::DIVERGING {
                                 ui.selectable_value(
                                     &mut self.ui_state.colormap,
                                     cm,
@@ -847,23 +884,10 @@ impl GeoScopeTabViewer<'_> {
                     if file.field_data.is_some() {
                         ui.label(egui::RichText::new("Export").size(11.0).color(egui::Color32::from_gray(160)));
                         ui.add_space(2.0);
-                        if ui.button("Save PNG").clicked() {
-                            if let Some(ref field) = file.field_data {
-                                if let Some(path) = rfd::FileDialog::new()
-                                    .add_filter("PNG", &["png"])
-                                    .set_file_name(&format!("{}.png", var.name))
-                                    .save_file()
-                                {
-                                    match crate::renderer::export::export_png(field, self.ui_state.colormap, &path) {
-                                        Ok(()) => {
-                                            self.ui_state.status_text = format!("Exported: {}", path.display());
-                                        }
-                                        Err(e) => {
-                                            self.ui_state.status_text = format!("Export error: {e}");
-                                        }
-                                    }
-                                }
-                            }
+                        if ui.button("Export PNG...").clicked() {
+                            // Pre-fill title with variable name
+                            self.ui_state.export_settings.title = var.name.clone();
+                            self.ui_state.export_dialog_open = true;
                         }
                     }
                 } else {

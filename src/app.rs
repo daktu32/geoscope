@@ -304,6 +304,145 @@ impl eframe::App for GeoScopeApp {
             .style(dock_style(ctx))
             .show(ctx, &mut tab_viewer);
 
+        // Export dialog
+        if self.ui_state.export_dialog_open {
+            let mut open = true;
+            let mut do_export = false;
+            egui::Window::new("Export PNG")
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.set_min_width(280.0);
+
+                    // Title
+                    ui.horizontal(|ui| {
+                        ui.label("Title:");
+                        ui.text_edit_singleline(&mut self.ui_state.export_settings.title);
+                    });
+
+                    ui.add_space(4.0);
+
+                    // Resolution
+                    ui.horizontal(|ui| {
+                        ui.label("Resolution:");
+                        for s in [1u32, 2, 4] {
+                            ui.selectable_value(
+                                &mut self.ui_state.export_settings.scale,
+                                s,
+                                format!("{}x", s),
+                            );
+                        }
+                    });
+
+                    // Show output size
+                    if let Some(field) = self.data_store.active_field() {
+                        let s = self.ui_state.export_settings.scale;
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "  {}x{} px",
+                                field.width as u32 * s,
+                                field.height as u32 * s
+                            ))
+                            .size(10.0)
+                            .color(egui::Color32::from_gray(120)),
+                        );
+                    }
+
+                    ui.add_space(4.0);
+
+                    // Colorbar toggle
+                    ui.checkbox(&mut self.ui_state.export_settings.colorbar, "Include colorbar");
+
+                    ui.add_space(4.0);
+
+                    // Preview colormap bar
+                    let bar_w = ui.available_width() - 8.0;
+                    let bar_h = 10.0;
+                    let (rect, _) = ui.allocate_exact_size(egui::vec2(bar_w, bar_h), egui::Sense::hover());
+                    let lut = crate::renderer::common::colormap_lut(self.ui_state.colormap);
+                    let painter = ui.painter();
+                    let mut mesh = egui::Mesh::default();
+                    let n_stops = 64;
+                    for i in 0..=n_stops {
+                        let t = i as f32 / n_stops as f32;
+                        let idx = (t * 255.0) as usize;
+                        let base = idx * 4;
+                        let color = egui::Color32::from_rgb(lut[base], lut[base + 1], lut[base + 2]);
+                        let x = rect.left() + t * rect.width();
+                        mesh.colored_vertex(egui::pos2(x, rect.top()), color);
+                        mesh.colored_vertex(egui::pos2(x, rect.bottom()), color);
+                    }
+                    for i in 0..n_stops {
+                        let tl = (i * 2) as u32;
+                        let bl = tl + 1;
+                        let tr = tl + 2;
+                        let br = tl + 3;
+                        mesh.add_triangle(tl, bl, tr);
+                        mesh.add_triangle(bl, br, tr);
+                    }
+                    painter.add(egui::Shape::mesh(mesh));
+
+                    ui.add_space(8.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    // Export button
+                    if ui.button("Save...").clicked() {
+                        do_export = true;
+                    }
+                });
+            if !open {
+                self.ui_state.export_dialog_open = false;
+            }
+            if do_export {
+                if let Some(field) = self.data_store.active_field().cloned() {
+                    // Determine display range
+                    let (display_min, display_max) = match self.ui_state.range_mode {
+                        crate::ui::RangeMode::Slice => (field.min, field.max),
+                        crate::ui::RangeMode::Global => {
+                            self.global_range_cache.unwrap_or((field.min, field.max))
+                        }
+                        crate::ui::RangeMode::Manual => {
+                            let rmin = self.ui_state.manual_min;
+                            let rmax = self.ui_state.manual_max;
+                            if (rmax - rmin).abs() > f32::EPSILON { (rmin, rmax) } else { (field.min, field.max) }
+                        }
+                    };
+
+                    let default_name = format!("{}.png", self.ui_state.export_settings.title);
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("PNG", &["png"])
+                        .set_file_name(&default_name)
+                        .save_file()
+                    {
+                        match crate::renderer::export::export_png_with_settings(
+                            &field,
+                            self.ui_state.colormap,
+                            display_min,
+                            display_max,
+                            &self.ui_state.export_settings,
+                            &path,
+                        ) {
+                            Ok(()) => {
+                                let s = self.ui_state.export_settings.scale;
+                                self.ui_state.status_text = format!(
+                                    "Exported {}x: {}",
+                                    s,
+                                    path.display()
+                                );
+                                self.ui_state.export_dialog_open = false;
+                            }
+                            Err(e) => {
+                                self.ui_state.status_text = format!("Export error: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Handle file open requests from UI
         if !self.open_file_request.is_empty() {
             let paths: Vec<_> = std::mem::take(&mut self.open_file_request);
