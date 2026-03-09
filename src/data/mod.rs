@@ -27,6 +27,7 @@ pub enum ColormapHint {
 pub struct GridInfo {
     pub lon: Option<Vec<f64>>,
     pub lat: Option<Vec<f64>>,
+    pub lev: Option<Vec<f64>>,
 }
 
 /// Metadata and data for an opened NetCDF file.
@@ -73,6 +74,7 @@ pub struct CrossSectionData {
     pub min: f32,
     pub max: f32,
     pub axis: CrossSectionAxis,
+    pub level_values: Vec<f64>, // coordinate values for each level (e.g. radial distance, sigma)
 }
 
 /// Profile data (1D line graph: vertical profile or time series).
@@ -272,6 +274,7 @@ impl DataStore {
         let grid = GridInfo {
             lon: read_coord_var(&file, LON_NAMES),
             lat: read_coord_var(&file, LAT_NAMES),
+            lev: read_coord_var(&file, LEVEL_NAMES),
         };
 
         let open_file = OpenFile {
@@ -461,6 +464,13 @@ impl DataStore {
         let min = all_values.iter().copied().fold(f32::INFINITY, f32::min);
         let max = all_values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
 
+        // Read level coordinate values
+        let level_dim_name = &dims[level_pos].0;
+        let level_values = file
+            .variable(level_dim_name)
+            .and_then(|v| v.get_values::<f64, _>(..).ok())
+            .unwrap_or_else(|| (0..n_levels).map(|i| i as f64).collect());
+
         Ok(CrossSectionData {
             values: all_values,
             n_levels,
@@ -468,6 +478,7 @@ impl DataStore {
             min,
             max,
             axis,
+            level_values,
         })
     }
 

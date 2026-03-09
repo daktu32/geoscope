@@ -11,6 +11,7 @@ pub struct CrossSectionRenderer {
     n_spatial: usize,
     n_levels: usize,
     is_lat_axis: bool,
+    level_values: Vec<f64>,
 }
 
 impl CrossSectionRenderer {
@@ -21,6 +22,7 @@ impl CrossSectionRenderer {
             n_spatial: 0,
             n_levels: 0,
             is_lat_axis: false,
+            level_values: Vec::new(),
         }
     }
 
@@ -47,6 +49,7 @@ impl CrossSectionRenderer {
         self.n_spatial = w;
         self.n_levels = h;
         self.is_lat_axis = data.axis == crate::data::CrossSectionAxis::Latitude;
+        self.level_values = data.level_values.clone();
     }
 
     /// Draw the cross-section filling the available space with axis labels.
@@ -157,17 +160,28 @@ impl CrossSectionRenderer {
             );
         }
 
-        // Y-axis: Level indices (top = high level, bottom = level 0)
+        // Y-axis: Level coordinate values (top = high level, bottom = level 0)
+        let has_coord = !self.level_values.is_empty() && self.level_values.len() == self.n_levels;
         let n_ticks = 5.min(self.n_levels).max(2);
         for i in 0..n_ticks {
             let frac = i as f32 / (n_ticks - 1) as f32;
             let y = plot_rect.min.y + frac * plot_rect.height();
             // top of image = highest level index, bottom = level 0
-            let level_val = ((1.0 - frac) * (self.n_levels - 1) as f32).round() as usize;
+            let level_idx = ((1.0 - frac) * (self.n_levels - 1) as f32).round() as usize;
+            let label_text = if has_coord {
+                let v = self.level_values[level_idx];
+                if v.abs() >= 100.0 || (v.abs() < 0.01 && v != 0.0) {
+                    format!("{v:.2e}")
+                } else {
+                    format!("{v:.3}")
+                }
+            } else {
+                format!("{level_idx}")
+            };
             painter.text(
                 egui::pos2(plot_rect.min.x - 4.0, y),
                 egui::Align2::RIGHT_CENTER,
-                format!("{level_val}"),
+                label_text,
                 font.clone(),
                 label_color,
             );

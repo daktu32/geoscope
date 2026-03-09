@@ -582,104 +582,188 @@ impl GeoScopeTabViewer<'_> {
                 });
             });
 
-        // Level slider (above tab bar, below time slider)
+        // Level slider (vertical, left side of viewport, vertically centered)
         if let Some((level_name, level_size)) = self.active_level_dim() {
             if level_size > 1 {
-                egui::TopBottomPanel::bottom("viewport_level")
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 2)))
+                egui::SidePanel::left("viewport_level")
+                    .exact_width(40.0)
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 8)))
                     .show_inside(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(format!("{}: {}", level_name, self.ui_state.level_index))
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(crate::app::TEXT_SECONDARY),
-                            );
+                        let max_lev = level_size - 1;
+                        let mut lev = self.ui_state.level_index.min(max_lev);
 
-                            let max_lev = level_size - 1;
-                            let mut lev = self.ui_state.level_index.min(max_lev);
-                            let slider = egui::Slider::new(&mut lev, 0..=max_lev)
-                                .show_value(false);
-                            if ui.add(slider).changed() {
-                                self.ui_state.level_index = lev;
+                        // Coordinate value string
+                        let coord_str = self.data_store.active_file
+                            .and_then(|fi| self.data_store.files.get(fi))
+                            .and_then(|f| f.grid.lev.as_ref())
+                            .and_then(|lev_vals| lev_vals.get(lev))
+                            .map(|&v| {
+                                if v.abs() >= 100.0 || (v.abs() < 0.01 && v != 0.0) {
+                                    format!("{v:.1e}")
+                                } else {
+                                    format!("{v:.2}")
+                                }
+                            })
+                            .unwrap_or_else(|| format!("{lev}"));
+
+                        // Center everything vertically
+                        let available_h = ui.available_height();
+                        let slider_h = (available_h - 60.0).max(40.0);
+                        let top_pad = (available_h - slider_h - 40.0).max(0.0) / 2.0;
+                        ui.add_space(top_pad);
+
+                        // Label: dimension name
+                        ui.label(
+                            egui::RichText::new(&level_name)
+                                .monospace()
+                                .size(9.0)
+                                .color(crate::app::TEXT_CAPTION),
+                        );
+
+                        // Vertical slider
+                        let slider = egui::Slider::new(&mut lev, 0..=max_lev)
+                            .vertical()
+                            .show_value(false);
+                        if ui.add_sized([28.0, slider_h], slider).changed() {
+                            self.ui_state.level_index = lev;
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        let t = self.ui_state.time_index;
+                                        if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
+                                            *self.data_generation += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        // Current value below slider
+                        ui.label(
+                            egui::RichText::new(coord_str)
+                                .monospace()
+                                .size(10.0)
+                                .color(crate::app::TEXT_SECONDARY),
+                        );
+                    });
+            }
+        }
+
+        // Time controls (video player style: full-width seekbar + control row)
+        if let Some(time_len) = self.active_time_dim_len() {
+            if time_len > 1 {
+                egui::TopBottomPanel::bottom("viewport_time")
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(0, 0)))
+                    .show_inside(ui, |ui| {
+                        let mut t = self.ui_state.time_index;
+                        if t >= time_len {
+                            t = 0;
+                            self.ui_state.time_index = 0;
+                        }
+                        let max = time_len - 1;
+
+                        // Row 1: Full-width seekbar (no side margins)
+                        ui.spacing_mut().slider_width = ui.available_width() - 16.0;
+                        let slider = egui::Slider::new(&mut t, 0..=max)
+                            .show_value(false);
+                        if ui.add_sized([ui.available_width(), 14.0], slider).changed() {
+                            self.ui_state.time_index = t;
+                            self.ui_state.playing = false;
+                            if self.ui_state.view_mode != ViewMode::Profile {
                                 if let Some(fi) = self.data_store.active_file {
                                     if let Some(file) = self.data_store.files.get(fi) {
                                         if let Some(vi) = file.selected_variable {
-                                            let t = self.ui_state.time_index;
-                                            if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
+                                            if self.data_store.load_field_at(fi, vi, t, self.ui_state.level_index).is_ok() {
                                                 *self.data_generation += 1;
                                             }
                                         }
                                     }
                                 }
                             }
-                        });
-                    });
-            }
-        }
+                        }
 
-        // Time slider (above level slider)
-        if let Some(time_len) = self.active_time_dim_len() {
-            if time_len > 1 {
-                egui::TopBottomPanel::bottom("viewport_time")
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(8, 2)))
-                    .show_inside(ui, |ui| {
+                        // Row 2: ⏮ ▶ ⏭  3/1000                      10fps
+                        let mut step_delta: isize = 0;
                         ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.add_space(4.0);
+
+                            // Step backward
+                            if ui.button(egui::RichText::new("⏮").size(12.0)).clicked() {
+                                step_delta = -1;
+                            }
+
+                            // Play/Pause
                             let icon = if self.ui_state.playing { "⏸" } else { "▶" };
-                            if ui.button(egui::RichText::new(icon).size(12.0)).clicked() {
+                            if ui.button(egui::RichText::new(icon).size(13.0)).clicked() {
                                 self.ui_state.playing = !self.ui_state.playing;
                                 self.ui_state.play_accumulator = 0.0;
                             }
 
+                            // Step forward
+                            if ui.button(egui::RichText::new("⏭").size(12.0)).clicked() {
+                                step_delta = 1;
+                            }
+
+                            // Step counter
                             ui.label(
-                                egui::RichText::new(format!("t={}", self.ui_state.time_index))
+                                egui::RichText::new(format!("{}/{}", t, max))
                                     .monospace()
                                     .size(11.0)
                                     .color(crate::app::TEXT_SECONDARY),
                             );
 
-                            let mut t = self.ui_state.time_index;
-                            if t >= time_len {
-                                t = 0;
-                                self.ui_state.time_index = 0;
-                            }
-                            let max = time_len - 1;
-                            let slider = egui::Slider::new(&mut t, 0..=max)
-                                .show_value(false);
-                            if ui.add(slider).changed() {
-                                self.ui_state.time_index = t;
-                                self.ui_state.playing = false;
-                                if self.ui_state.view_mode != ViewMode::Profile {
-                                    if let Some(fi) = self.data_store.active_file {
-                                        if let Some(file) = self.data_store.files.get(fi) {
-                                            if let Some(vi) = file.selected_variable {
-                                                if self.data_store.load_field_at(fi, vi, t, self.ui_state.level_index).is_ok() {
-                                                    *self.data_generation += 1;
-                                                }
+                            // Right-aligned FPS
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                ui.add_space(4.0);
+                                let fps_text = format!("{:.0}fps", self.ui_state.play_speed);
+                                let fps_btn = ui.add(
+                                    egui::Button::new(
+                                        egui::RichText::new(fps_text)
+                                            .monospace()
+                                            .size(10.0)
+                                            .color(crate::app::TEXT_CAPTION),
+                                    )
+                                    .frame(false),
+                                );
+                                if fps_btn.clicked() {
+                                    let fps_steps = [1.0, 2.0, 5.0, 10.0, 30.0, 60.0];
+                                    let current = self.ui_state.play_speed;
+                                    let next = fps_steps.iter()
+                                        .find(|&&s| s > current + 0.5)
+                                        .copied()
+                                        .unwrap_or(fps_steps[0]);
+                                    self.ui_state.play_speed = next;
+                                }
+                                if fps_btn.hovered() {
+                                    egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("fps_tooltip"), |ui| {
+                                        ui.label("Click to cycle FPS");
+                                    });
+                                }
+                            });
+                        });
+
+                        // Apply step button
+                        if step_delta != 0 {
+                            let new_t = if step_delta > 0 {
+                                (t + 1) % time_len
+                            } else {
+                                if t == 0 { max } else { t - 1 }
+                            };
+                            self.ui_state.time_index = new_t;
+                            self.ui_state.playing = false;
+                            if self.ui_state.view_mode != ViewMode::Profile {
+                                if let Some(fi) = self.data_store.active_file {
+                                    if let Some(file) = self.data_store.files.get(fi) {
+                                        if let Some(vi) = file.selected_variable {
+                                            if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
+                                                *self.data_generation += 1;
                                             }
                                         }
                                     }
                                 }
                             }
-
-                            ui.label(
-                                egui::RichText::new(format!("{}", max))
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(crate::app::TEXT_CAPTION),
-                            );
-                            ui.separator();
-                            ui.label(egui::RichText::new("×").size(11.0).color(crate::app::TEXT_CAPTION));
-                            let mut speed = self.ui_state.play_speed;
-                            let speed_slider = egui::Slider::new(&mut speed, 1.0..=60.0)
-                                .logarithmic(true)
-                                .show_value(true)
-                                .suffix(" fps")
-                                .custom_formatter(|v, _| format!("{:.0}", v));
-                            if ui.add_sized([120.0, 18.0], speed_slider).changed() {
-                                self.ui_state.play_speed = speed;
-                            }
-                        });
+                        }
                     });
             }
         }
@@ -857,6 +941,66 @@ impl GeoScopeTabViewer<'_> {
                 galley,
                 crate::app::TEXT_BODY,
             );
+        }
+
+        // Floating zoom controls (bottom-right corner, Globe/Map only)
+        if matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map) {
+            let btn_size = egui::vec2(26.0, 26.0);
+            let margin = 10.0;
+            let gap = 2.0;
+            // Stack vertically: [+] above [−]
+            let minus_pos = egui::pos2(
+                central.right() - btn_size.x - margin,
+                central.bottom() - btn_size.y - margin,
+            );
+            let plus_pos = egui::pos2(minus_pos.x, minus_pos.y - btn_size.y - gap);
+
+            let plus_rect = egui::Rect::from_min_size(plus_pos, btn_size);
+            let minus_rect = egui::Rect::from_min_size(minus_pos, btn_size);
+
+            let plus_resp = ui.allocate_rect(plus_rect, egui::Sense::click());
+            let minus_resp = ui.allocate_rect(minus_rect, egui::Sense::click());
+
+            let bg = egui::Color32::from_rgba_unmultiplied(15, 15, 23, 180);
+            let combined_rect = egui::Rect::from_min_max(plus_pos, minus_pos + btn_size);
+            let painter = ui.painter();
+            painter.rect_filled(combined_rect, 4.0, bg);
+
+            let text_color = if plus_resp.hovered() { crate::app::TEXT_HEADING } else { crate::app::TEXT_SECONDARY };
+            painter.text(plus_rect.center(), egui::Align2::CENTER_CENTER,
+                "+", egui::FontId::monospace(14.0), text_color);
+
+            let text_color = if minus_resp.hovered() { crate::app::TEXT_HEADING } else { crate::app::TEXT_SECONDARY };
+            painter.text(minus_rect.center(), egui::Align2::CENTER_CENTER,
+                "−", egui::FontId::monospace(14.0), text_color);
+
+            // Divider line between + and −
+            let div_y = plus_rect.bottom();
+            painter.line_segment(
+                [egui::pos2(plus_rect.left() + 4.0, div_y), egui::pos2(plus_rect.right() - 4.0, div_y)],
+                egui::Stroke::new(0.5, egui::Color32::from_gray(60)),
+            );
+
+            let zoom_factor = 1.15;
+            match self.ui_state.view_mode {
+                ViewMode::Globe => {
+                    if plus_resp.clicked() {
+                        self.globe_renderer.zoom = (self.globe_renderer.zoom * zoom_factor).min(5.0);
+                    }
+                    if minus_resp.clicked() {
+                        self.globe_renderer.zoom = (self.globe_renderer.zoom / zoom_factor).max(0.3);
+                    }
+                }
+                ViewMode::Map => {
+                    if plus_resp.clicked() {
+                        self.map_renderer.zoom = (self.map_renderer.zoom * zoom_factor).min(10.0);
+                    }
+                    if minus_resp.clicked() {
+                        self.map_renderer.zoom = (self.map_renderer.zoom / zoom_factor).max(0.3);
+                    }
+                }
+                _ => {}
+            }
         }
 
         ui.allocate_rect(central, egui::Sense::hover());
@@ -1162,7 +1306,29 @@ impl GeoScopeTabViewer<'_> {
 
                         if max_idx > 0 {
                             let mut idx = self.ui_state.cross_section_idx.min(max_idx);
-                            if ui.add(egui::Slider::new(&mut idx, 0..=max_idx).text("Index")).changed() {
+                            // Show coordinate value next to slider
+                            let coord_label = match self.ui_state.cross_section_axis {
+                                crate::data::CrossSectionAxis::Latitude => {
+                                    // Fix Lat: show latitude value
+                                    file.grid.lat.as_ref()
+                                        .and_then(|lat| lat.get(idx))
+                                        .map(|&v| format!("{v:.1}°"))
+                                        .unwrap_or_default()
+                                }
+                                crate::data::CrossSectionAxis::Longitude => {
+                                    // Fix Lon: show longitude value
+                                    file.grid.lon.as_ref()
+                                        .and_then(|lon| lon.get(idx))
+                                        .map(|&v| format!("{v:.1}°"))
+                                        .unwrap_or_default()
+                                }
+                            };
+                            let slider_text = if coord_label.is_empty() {
+                                "Index".to_string()
+                            } else {
+                                coord_label
+                            };
+                            if ui.add(egui::Slider::new(&mut idx, 0..=max_idx).text(slider_text)).changed() {
                                 self.ui_state.cross_section_idx = idx;
                                 *self.data_generation += 1;
                             }
