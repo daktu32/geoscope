@@ -88,6 +88,21 @@ pub struct ProfileData {
     pub max: f32,
 }
 
+/// Time × Level heatmap data at a fixed (lon, lat) point.
+#[derive(Debug, Clone)]
+pub struct TimeLevelData {
+    pub values: Vec<f32>,  // row-major [time][level]
+    pub n_time: usize,
+    pub n_level: usize,
+    pub time_values: Vec<f64>,
+    pub level_values: Vec<f64>,
+    pub time_label: String,
+    pub level_label: String,
+    pub value_label: String,
+    pub min: f32,
+    pub max: f32,
+}
+
 /// Vector field data (u, v components) for overlay rendering.
 #[derive(Debug, Clone)]
 pub struct VectorFieldData {
@@ -691,6 +706,80 @@ impl DataStore {
             values,
             axis_values,
             axis_label: time_dim_name.clone(),
+            value_label: var_info.name.clone(),
+            min,
+            max,
+        })
+    }
+
+    /// Load a 2D time × level heatmap at a fixed (lon, lat) point.
+    /// Extracts values for all time steps and all levels.
+    pub fn load_time_level_data(
+        &self,
+        file_idx: usize,
+        var_idx: usize,
+        lon_idx: usize,
+        lat_idx: usize,
+    ) -> Option<TimeLevelData> {
+        let file_entry = &self.files[file_idx];
+        let var_info = &file_entry.variables[var_idx];
+
+        let file = netcdf::open(&file_entry.path).ok()?;
+        let var = file.variable(&var_info.name)?;
+
+        let dims = &var_info.dimensions;
+        let ndim = dims.len();
+
+        // Need both time and level dimensions
+        let (time_pos, n_time) = find_dim(dims, TIME_NAMES)?;
+        let (level_pos, n_level) = find_dim(dims, LEVEL_NAMES)?;
+        let lat_pos = find_dim(dims, LAT_NAMES).map(|(p, _)| p);
+        let lon_pos = find_dim(dims, LON_NAMES).map(|(p, _)| p);
+
+        // Read all time × level at fixed lon, lat
+        let mut values = Vec::with_capacity(n_time * n_level);
+        for t in 0..n_time {
+            let mut start = vec![0usize; ndim];
+            let mut count = vec![1usize; ndim];
+            start[time_pos] = t;
+            count[level_pos] = n_level;
+            if let Some(lp) = lat_pos {
+                start[lp] = lat_idx;
+            }
+            if let Some(lop) = lon_pos {
+                start[lop] = lon_idx;
+            }
+            let extents: Vec<std::ops::Range<usize>> = start
+                .iter()
+                .zip(count.iter())
+                .map(|(&s, &c)| s..s + c)
+                .collect();
+            let row: Vec<f64> = var.get_values(extents.as_slice()).ok()?;
+            values.extend(row.iter().map(|&v| v as f32));
+        }
+
+        let min = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let max = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+
+        let time_dim_name = &dims[time_pos].0;
+        let level_dim_name = &dims[level_pos].0;
+        let time_values = file
+            .variable(time_dim_name)
+            .and_then(|v| v.get_values::<f64, _>(..).ok())
+            .unwrap_or_else(|| (0..n_time).map(|i| i as f64).collect());
+        let level_values = file
+            .variable(level_dim_name)
+            .and_then(|v| v.get_values::<f64, _>(..).ok())
+            .unwrap_or_else(|| (0..n_level).map(|i| i as f64).collect());
+
+        Some(TimeLevelData {
+            values,
+            n_time,
+            n_level,
+            time_values,
+            level_values,
+            time_label: time_dim_name.clone(),
+            level_label: level_dim_name.clone(),
             value_label: var_info.name.clone(),
             min,
             max,

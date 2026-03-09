@@ -72,6 +72,7 @@ pub struct GeoScopeApp {
     cross_section_generation: u64,
     vector_generation: u64,
     profile_generation: u64,
+    profile_is_time_series: bool,
     contour_generation: u64,
     streamline_generation: u64,
     trajectory_generation: u64,
@@ -119,6 +120,7 @@ impl GeoScopeApp {
             cross_section_generation: 0,
             vector_generation: 0,
             profile_generation: 0,
+            profile_is_time_series: false,
             contour_generation: 0,
             streamline_generation: 0,
             trajectory_generation: 0,
@@ -726,38 +728,99 @@ impl eframe::App for GeoScopeApp {
         self.vector_overlay.density = self.ui_state.vector_density;
         self.vector_overlay.scale = self.ui_state.vector_scale;
 
-        // Profile data loading
-        if self.ui_state.view_mode == crate::ui::ViewMode::Profile
-            && self.profile_generation != self.data_generation
-        {
+        // Profile data loading — triggered by Profile view OR split view with a picked point
+        let need_profile = self.ui_state.view_mode == crate::ui::ViewMode::Profile
+            || (self.ui_state.profile_split && self.ui_state.profile_point.is_some());
+        if need_profile && self.profile_generation != self.data_generation {
             if let Some(file_idx) = self.data_store.active_file {
                 if let Some(file) = self.data_store.files.get(file_idx) {
                     if let Some(var_idx) = file.selected_variable {
                         if let Some(ref field) = file.field_data {
-                            let lon_idx = field.width / 2;
-                            let lat_idx = field.height / 2;
+                            let (lon_idx, lat_idx) = self.ui_state.profile_point
+                                .unwrap_or((field.width / 2, field.height / 2));
                             let time_idx = self.ui_state.time_index;
-                            if let Some(profile) = self.data_store.load_profile_data(
-                                file_idx, var_idx, time_idx, lon_idx, lat_idx,
-                            ) {
-                                let var_name = file.variables[var_idx].name.clone();
-                                self.profile_renderer.set_title(format!(
-                                    "{} (lon={}, lat={})", var_name, lon_idx, lat_idx
-                                ));
-                                self.profile_renderer.set_data(profile);
-                            } else {
-                                // Fall back to time series
-                                let level_idx = self.ui_state.level_index;
-                                if let Some(ts) = self.data_store.load_time_series_data(
-                                    file_idx, var_idx, level_idx, lon_idx, lat_idx,
-                                ) {
-                                    let var_name = file.variables[var_idx].name.clone();
-                                    self.profile_renderer.set_title(format!(
-                                        "{} time series (lon={}, lat={})", var_name, lon_idx, lat_idx
-                                    ));
-                                    self.profile_renderer.set_data(ts);
-                                } else {
-                                    self.profile_renderer.clear();
+                            // Get lon/lat degree strings for title
+                            let lon_str = self.data_store.files.get(file_idx)
+                                .and_then(|f| f.grid.lon.as_ref())
+                                .and_then(|lons| lons.get(lon_idx))
+                                .map(|&v| format!("{v:.1}"))
+                                .unwrap_or_else(|| format!("{lon_idx}"));
+                            let lat_str = self.data_store.files.get(file_idx)
+                                .and_then(|f| f.grid.lat.as_ref())
+                                .and_then(|lats| lats.get(lat_idx))
+                                .map(|&v| format!("{v:.1}"))
+                                .unwrap_or_else(|| format!("{lat_idx}"));
+                            let mode = self.ui_state.profile_mode;
+                            self.profile_is_time_series = false;
+
+                            match mode {
+                                crate::ui::ProfileMode::TimeLevelHeatmap
+                                | crate::ui::ProfileMode::Surface3D => {
+                                    // Time × Level heatmap / 3D surface (same data)
+                                    self.profile_is_time_series = true; // enable playhead
+                                    if let Some(tl_data) = self.data_store.load_time_level_data(
+                                        file_idx, var_idx, lon_idx, lat_idx,
+                                    ) {
+                                        let var_name = file.variables[var_idx].name.clone();
+                                        self.profile_renderer.set_title(format!(
+                                            "{} (lon={}, lat={})", var_name, lon_str, lat_str
+                                        ));
+                                        self.profile_renderer.set_heatmap_data(tl_data, self.ui_state.colormap);
+                                    } else {
+                                        self.profile_renderer.clear();
+                                    }
+                                }
+                                crate::ui::ProfileMode::TimeSeries => {
+                                    self.profile_renderer.clear_heatmap();
+                                    let level_idx = self.ui_state.level_index;
+                                    if let Some(ts) = self.data_store.load_time_series_data(
+                                        file_idx, var_idx, level_idx, lon_idx, lat_idx,
+                                    ) {
+                                        self.profile_is_time_series = true;
+                                        let var_name = file.variables[var_idx].name.clone();
+                                        self.profile_renderer.set_title(format!(
+                                            "{} time series (lon={}, lat={})", var_name, lon_str, lat_str
+                                        ));
+                                        self.profile_renderer.set_data(ts);
+                                    } else if let Some(profile) = self.data_store.load_profile_data(
+                                        file_idx, var_idx, time_idx, lon_idx, lat_idx,
+                                    ) {
+                                        let var_name = file.variables[var_idx].name.clone();
+                                        self.profile_renderer.set_title(format!(
+                                            "{} (lon={}, lat={})", var_name, lon_str, lat_str
+                                        ));
+                                        self.profile_renderer.set_data(profile);
+                                        self.profile_renderer.set_current_index(None);
+                                    } else {
+                                        self.profile_renderer.clear();
+                                    }
+                                }
+                                crate::ui::ProfileMode::Vertical => {
+                                    self.profile_renderer.clear_heatmap();
+                                    if let Some(profile) = self.data_store.load_profile_data(
+                                        file_idx, var_idx, time_idx, lon_idx, lat_idx,
+                                    ) {
+                                        let var_name = file.variables[var_idx].name.clone();
+                                        self.profile_renderer.set_title(format!(
+                                            "{} (lon={}, lat={})", var_name, lon_str, lat_str
+                                        ));
+                                        self.profile_renderer.set_data(profile);
+                                        self.profile_renderer.set_current_index(None);
+                                    } else {
+                                        self.profile_is_time_series = true;
+                                        let level_idx = self.ui_state.level_index;
+                                        if let Some(ts) = self.data_store.load_time_series_data(
+                                            file_idx, var_idx, level_idx, lon_idx, lat_idx,
+                                        ) {
+                                            let var_name = file.variables[var_idx].name.clone();
+                                            self.profile_renderer.set_title(format!(
+                                                "{} time series (lon={}, lat={})", var_name, lon_str, lat_str
+                                            ));
+                                            self.profile_renderer.set_data(ts);
+                                        } else {
+                                            self.profile_renderer.clear();
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -767,8 +830,8 @@ impl eframe::App for GeoScopeApp {
             self.profile_generation = self.data_generation;
         }
 
-        // Sync profile playhead with current time index (every frame, cheap)
-        if self.ui_state.view_mode == crate::ui::ViewMode::Profile {
+        // Sync profile playhead with current time index (time series only)
+        if need_profile && self.profile_is_time_series {
             self.profile_renderer.set_current_index(Some(self.ui_state.time_index));
         }
 

@@ -39,6 +39,10 @@ pub enum ProfileMode {
     #[default]
     Vertical,
     TimeSeries,
+    /// Time × Level heatmap at a fixed (lon, lat) point.
+    TimeLevelHeatmap,
+    /// 3D surface plot (x=time, y=level, z=value).
+    Surface3D,
 }
 
 /// Colormap selection.
@@ -139,6 +143,8 @@ pub struct UiState {
     // Profile view
     pub profile_point: Option<(usize, usize)>, // (lon_idx, lat_idx)
     pub profile_mode: ProfileMode,
+    /// Show profile alongside Globe/Map in split view
+    pub profile_split: bool,
     // Zonal Mean
     pub zonal_mean_enabled: bool,
     // Contour overlay
@@ -197,6 +203,7 @@ impl Default for UiState {
             hover_info: None,
             profile_point: None,
             profile_mode: ProfileMode::default(),
+            profile_split: false,
             zonal_mean_enabled: false,
             contour_enabled: false,
             contour_levels: 10,
@@ -586,8 +593,8 @@ impl GeoScopeTabViewer<'_> {
         if let Some((level_name, level_size)) = self.active_level_dim() {
             if level_size > 1 {
                 egui::SidePanel::left("viewport_level")
-                    .exact_width(40.0)
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 8)))
+                    .exact_width(48.0)
+                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0)))
                     .show_inside(ui, |ui| {
                         let max_lev = level_size - 1;
                         let mut lev = self.ui_state.level_index.min(max_lev);
@@ -606,45 +613,69 @@ impl GeoScopeTabViewer<'_> {
                             })
                             .unwrap_or_else(|| format!("{lev}"));
 
-                        // Center everything vertically
-                        let available_h = ui.available_height();
-                        let slider_h = (available_h - 60.0).max(40.0);
-                        let top_pad = (available_h - slider_h - 40.0).max(0.0) / 2.0;
+                        // Get total height BEFORE entering inner layout
+                        let panel_h = ui.available_height();
+                        // Fixed slider height (not proportional — keeps it compact)
+                        let slider_h = 160.0_f32.min(panel_h - 80.0).max(40.0);
+                        // Content: label(~14) + gap(4) + slider + gap(4) + value(~14) + index(~12) ≈ slider_h + 48
+                        let content_h = slider_h + 52.0;
+                        let top_pad = ((panel_h - content_h) / 2.0).max(0.0);
+
                         ui.add_space(top_pad);
 
-                        // Label: dimension name
-                        ui.label(
-                            egui::RichText::new(&level_name)
-                                .monospace()
-                                .size(9.0)
-                                .color(crate::app::TEXT_CAPTION),
-                        );
+                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
+                            // "Level" header — makes purpose obvious
+                            ui.label(
+                                egui::RichText::new("Level")
+                                    .size(10.0)
+                                    .strong()
+                                    .color(crate::app::TEXT_HEADING),
+                            );
+                            // Dimension name (e.g. "sig", "lev", "plev")
+                            ui.label(
+                                egui::RichText::new(&level_name)
+                                    .monospace()
+                                    .size(9.0)
+                                    .color(crate::app::TEXT_CAPTION),
+                            );
 
-                        // Vertical slider
-                        let slider = egui::Slider::new(&mut lev, 0..=max_lev)
-                            .vertical()
-                            .show_value(false);
-                        if ui.add_sized([28.0, slider_h], slider).changed() {
-                            self.ui_state.level_index = lev;
-                            if let Some(fi) = self.data_store.active_file {
-                                if let Some(file) = self.data_store.files.get(fi) {
-                                    if let Some(vi) = file.selected_variable {
-                                        let t = self.ui_state.time_index;
-                                        if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
-                                            *self.data_generation += 1;
+                            ui.add_space(4.0);
+
+                            // Vertical slider
+                            let slider = egui::Slider::new(&mut lev, 0..=max_lev)
+                                .vertical()
+                                .show_value(false);
+                            if ui.add_sized([28.0, slider_h], slider).changed() {
+                                self.ui_state.level_index = lev;
+                                if let Some(fi) = self.data_store.active_file {
+                                    if let Some(file) = self.data_store.files.get(fi) {
+                                        if let Some(vi) = file.selected_variable {
+                                            let t = self.ui_state.time_index;
+                                            if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
+                                                *self.data_generation += 1;
+                                            }
                                         }
                                     }
                                 }
                             }
-                        }
 
-                        // Current value below slider
-                        ui.label(
-                            egui::RichText::new(coord_str)
-                                .monospace()
-                                .size(10.0)
-                                .color(crate::app::TEXT_SECONDARY),
-                        );
+                            ui.add_space(4.0);
+
+                            // Current coordinate value
+                            ui.label(
+                                egui::RichText::new(&coord_str)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(crate::app::TEXT_SECONDARY),
+                            );
+                            // Index indicator
+                            ui.label(
+                                egui::RichText::new(format!("{}/{}", lev, max_lev))
+                                    .monospace()
+                                    .size(9.0)
+                                    .color(crate::app::TEXT_CAPTION),
+                            );
+                        });
                     });
             }
         }
@@ -769,8 +800,24 @@ impl GeoScopeTabViewer<'_> {
         }
 
         // Central area: the actual view (gets all remaining space)
-        let central = ui.available_rect_before_wrap();
+        let full_central = ui.available_rect_before_wrap();
+
+        // Split view: if profile_split is active and we're in Globe/Map, split left/right
+        let show_split = self.ui_state.profile_split
+            && self.ui_state.profile_point.is_some()
+            && matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map);
+        let (central, profile_rect) = if show_split {
+            let split_x = full_central.left() + full_central.width() * 0.6;
+            let left = egui::Rect::from_min_max(full_central.min, egui::pos2(split_x - 1.0, full_central.max.y));
+            let right = egui::Rect::from_min_max(egui::pos2(split_x + 1.0, full_central.min.y), full_central.max);
+            (left, Some(right))
+        } else {
+            (full_central, None)
+        };
+
         let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(central));
+        // Store Globe projection info for marker drawing later
+        let mut globe_proj_info: Option<(egui::Rect, [[f32; 4]; 4], [[f32; 4]; 4])> = None;
         match self.ui_state.view_mode {
             ViewMode::Globe => {
                 self.globe_renderer.paint(&mut child_ui);
@@ -812,6 +859,73 @@ impl GeoScopeTabViewer<'_> {
                         &view_proj_for_overlays,
                     );
                 }
+                globe_proj_info = Some((globe_rect, view_for_overlays, view_proj_for_overlays));
+                // Globe click → set profile point
+                // Use inverse of view matrix (transpose of rotation) to go screen → world
+                {
+                    let clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+                    let hover_pos = child_ui.input(|i| i.pointer.hover_pos());
+                    if clicked && !child_ui.input(|i| i.pointer.is_decidedly_dragging()) {
+                        if let Some(pos) = hover_pos {
+                            if globe_rect.contains(pos) {
+                                // Screen → NDC (clip space before proj)
+                                let ndx = (pos.x - globe_rect.center().x) / (globe_rect.width() * 0.5);
+                                let ndy = -(pos.y - globe_rect.center().y) / (globe_rect.height() * 0.5);
+
+                                // Inverse projection: undo the aspect/zoom scaling
+                                let aspect = globe_rect.width() / globe_rect.height().max(1.0);
+                                let zoom = self.globe_renderer.zoom;
+                                let (sx, sy) = if aspect > 1.0 {
+                                    (zoom / aspect, zoom)
+                                } else {
+                                    (zoom, zoom * aspect)
+                                };
+                                let vx = ndx / sx;  // view-space x
+                                let vy = ndy / sy;  // view-space y
+
+                                let r2 = vx * vx + vy * vy;
+                                if r2 <= 1.0 {
+                                    let vz = (1.0 - r2).sqrt(); // view-space z (into screen)
+
+                                    // Inverse view: view = rot_x * rot_y, so inverse = rot_y^T * rot_x^T
+                                    let cam_lon = self.globe_renderer.cam_lon;
+                                    let cam_lat = self.globe_renderer.cam_lat;
+                                    let (sin_lon, cos_lon) = cam_lon.sin_cos();
+                                    let (sin_lat, cos_lat) = cam_lat.sin_cos();
+
+                                    // rot_x^T: undo latitude rotation
+                                    let ix = vx;
+                                    let iy = cos_lat * vy + sin_lat * vz;
+                                    let iz = -sin_lat * vy + cos_lat * vz;
+
+                                    // rot_y^T: undo longitude rotation
+                                    let wx = cos_lon * ix + sin_lon * iz;
+                                    let wy = iy;
+                                    let wz = -sin_lon * ix + cos_lon * iz;
+
+                                    // World coords → lon/lat (Globe mesh convention)
+                                    // Globe mesh: x = cos_lat*cos(theta), y = sin(lat_rad), z = cos_lat*sin(theta)
+                                    // So lon = atan2(z, x), lat_rad = asin(y)
+                                    let lat_rad = wy.asin();
+                                    let lon_rad = wz.atan2(wx);    // atan2(sin_theta, cos_theta)
+
+                                    let lon_deg = lon_rad.to_degrees();
+                                    let lat_deg = -lat_rad.to_degrees(); // undo Globe mesh lat flip
+
+                                    let u = ((lon_deg + 180.0) / 360.0).rem_euclid(1.0);
+                                    let v = (90.0 - lat_deg) / 180.0;
+                                    if let Some(field) = self.data_store.active_field() {
+                                        let gx = ((u * field.width as f32) as usize).min(field.width - 1);
+                                        let gy = ((v * field.height as f32) as usize).min(field.height - 1);
+                                        self.ui_state.profile_point = Some((gx, gy));
+                                        self.ui_state.profile_split = true;
+                                        *self.data_generation += 1;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 self.ui_state.hover_info = None;
             }
             ViewMode::Map => {
@@ -852,9 +966,10 @@ impl GeoScopeTabViewer<'_> {
                         self.map_renderer.zoom,
                     );
                 }
-                // Map hover → Point Info (Equirectangular only)
+                // Map hover/click → Point Info + Profile pick (Equirectangular only)
                 if self.map_renderer.projection == MapProjection::Equirectangular {
                     let hover_pos = child_ui.input(|i| i.pointer.hover_pos());
+                    let clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
                     if let Some(pos) = hover_pos {
                         if central.contains(pos) {
                             // Screen → NDC (account for pan/zoom via inverse ortho)
@@ -877,17 +992,21 @@ impl GeoScopeTabViewer<'_> {
                                 let lon_deg = u * 360.0 - 180.0;
                                 let lat_deg = 90.0 - v * 180.0;
                                 // Look up data value at nearest grid point
-                                let value = self.data_store.active_field().map(|field| {
+                                if let Some(field) = self.data_store.active_field() {
                                     let gx = ((u * field.width as f32) as usize).min(field.width - 1);
                                     let gy = ((v * field.height as f32) as usize).min(field.height - 1);
-                                    field.values[gy * field.width + gx]
-                                });
-                                if let Some(val) = value {
+                                    let val = field.values[gy * field.width + gx];
                                     self.ui_state.hover_info = Some(HoverInfo {
                                         lon_deg,
                                         lat_deg,
                                         value: val,
                                     });
+                                    // Click → set profile point
+                                    if clicked && !child_ui.input(|i| i.pointer.is_decidedly_dragging()) {
+                                        self.ui_state.profile_point = Some((gx, gy));
+                                        self.ui_state.profile_split = true;
+                                        *self.data_generation += 1; // trigger profile reload
+                                    }
                                 }
                             } else {
                                 self.ui_state.hover_info = None;
@@ -1003,7 +1122,173 @@ impl GeoScopeTabViewer<'_> {
             }
         }
 
-        ui.allocate_rect(central, egui::Sense::hover());
+        // Selected point marker on Globe/Map
+        if let Some((gx, gy)) = self.ui_state.profile_point {
+            if matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map) {
+                if let Some(field) = self.data_store.active_field() {
+                    let u = (gx as f32 + 0.5) / field.width as f32;
+                    let v = (gy as f32 + 0.5) / field.height as f32;
+                    let marker_color = egui::Color32::from_rgb(255, 200, 50); // gold
+                    let painter = ui.painter();
+                    let arm = 8.0;
+
+                    let draw_marker = |painter: &egui::Painter, sp: egui::Pos2| {
+                        // Crosshair + circle
+                        painter.line_segment(
+                            [sp - egui::vec2(arm, 0.0), sp + egui::vec2(arm, 0.0)],
+                            egui::Stroke::new(1.5, marker_color),
+                        );
+                        painter.line_segment(
+                            [sp - egui::vec2(0.0, arm), sp + egui::vec2(0.0, arm)],
+                            egui::Stroke::new(1.5, marker_color),
+                        );
+                        painter.circle_stroke(sp, 5.0, egui::Stroke::new(1.5, marker_color));
+                        // Black outline for visibility on bright areas
+                        painter.circle_stroke(sp, 6.5, egui::Stroke::new(0.8, egui::Color32::from_black_alpha(120)));
+                    };
+
+                    if self.ui_state.view_mode == ViewMode::Globe {
+                        if let Some((globe_rect, view, view_proj)) = globe_proj_info {
+                            // UV → lon/lat → 3D sphere (same as trajectory overlay)
+                            let lon_deg = u * 360.0 - 180.0;
+                            let lat_deg = 90.0 - v * 180.0;
+                            let theta = lon_deg.to_radians();
+                            let lat_rad = (-lat_deg).to_radians(); // Globe mesh lat flip
+                            let cos_lat = lat_rad.cos();
+                            let x = cos_lat * theta.cos();
+                            let y = lat_rad.sin();
+                            let z = cos_lat * theta.sin();
+                            // Back-face culling via view matrix z-row
+                            let vz = view[2][0]*x + view[2][1]*y + view[2][2]*z;
+                            if vz >= 0.0 {
+                                // Apply view_proj to get clip coords
+                                let cx = view_proj[0][0]*x + view_proj[0][1]*y + view_proj[0][2]*z + view_proj[0][3];
+                                let cy = view_proj[1][0]*x + view_proj[1][1]*y + view_proj[1][2]*z + view_proj[1][3];
+                                let cw = view_proj[3][0]*x + view_proj[3][1]*y + view_proj[3][2]*z + view_proj[3][3];
+                                if cw.abs() > 1e-6 {
+                                    let ndx = cx / cw;
+                                    let ndy = cy / cw;
+                                    let screen_x = globe_rect.center().x + ndx * globe_rect.width() * 0.5;
+                                    let screen_y = globe_rect.center().y - ndy * globe_rect.height() * 0.5;
+                                    let sp = egui::pos2(screen_x, screen_y);
+                                    if central.contains(sp) {
+                                        draw_marker(painter, sp);
+                                    }
+                                }
+                            }
+                        }
+                    } else if self.ui_state.view_mode == ViewMode::Map
+                        && self.map_renderer.projection == MapProjection::Equirectangular
+                    {
+                        // UV → screen (same transform as Map rendering)
+                        let aspect = central.width() / central.height().max(1.0);
+                        let (ssx, ssy) = if aspect > 1.0 {
+                            (self.map_renderer.zoom / aspect, self.map_renderer.zoom)
+                        } else {
+                            (self.map_renderer.zoom, self.map_renderer.zoom * aspect)
+                        };
+                        let wx = u * 2.0 - 1.0;
+                        let wy = 1.0 - v * 2.0;
+                        let nx = wx * ssx - self.map_renderer.pan_x * ssx;
+                        let ny = -(wy * ssy - self.map_renderer.pan_y * ssy);
+                        let screen_x = central.center().x + nx * central.width() * 0.5;
+                        let screen_y = central.center().y + ny * central.height() * 0.5;
+                        let sp = egui::pos2(screen_x, screen_y);
+                        if central.contains(sp) {
+                            draw_marker(painter, sp);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Split view: draw profile in the right panel
+        if let Some(prof_rect) = profile_rect {
+            // Divider line
+            let div_x = prof_rect.left() - 1.0;
+            ui.painter().line_segment(
+                [egui::pos2(div_x, prof_rect.top()), egui::pos2(div_x, prof_rect.bottom())],
+                egui::Stroke::new(1.0, egui::Color32::from_gray(40)),
+            );
+
+            // Toolbar: mode toggle + close button
+            let toolbar_h = 24.0;
+            let toolbar_rect = egui::Rect::from_min_size(
+                prof_rect.min,
+                egui::vec2(prof_rect.width(), toolbar_h),
+            );
+            {
+                let mut tb_ui = ui.new_child(egui::UiBuilder::new().max_rect(toolbar_rect));
+                tb_ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    // Vertical / Time toggle buttons
+                    let vert_active = self.ui_state.profile_mode == ProfileMode::Vertical;
+                    let vert_text = egui::RichText::new("Vertical").size(10.0).color(
+                        if vert_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(vert_text).frame(false)).clicked() && !vert_active {
+                        self.ui_state.profile_mode = ProfileMode::Vertical;
+                        *self.data_generation += 1;
+                    }
+                    ui.label(egui::RichText::new("/").size(10.0).color(crate::app::TEXT_CAPTION));
+                    let ts_active = self.ui_state.profile_mode == ProfileMode::TimeSeries;
+                    let ts_text = egui::RichText::new("Time").size(10.0).color(
+                        if ts_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(ts_text).frame(false)).clicked() && !ts_active {
+                        self.ui_state.profile_mode = ProfileMode::TimeSeries;
+                        *self.data_generation += 1;
+                    }
+                    ui.label(egui::RichText::new("/").size(10.0).color(crate::app::TEXT_CAPTION));
+                    let hm_active = self.ui_state.profile_mode == ProfileMode::TimeLevelHeatmap;
+                    let hm_text = egui::RichText::new("T-Lev").size(10.0).color(
+                        if hm_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(hm_text).frame(false)).clicked() && !hm_active {
+                        self.ui_state.profile_mode = ProfileMode::TimeLevelHeatmap;
+                        *self.data_generation += 1;
+                    }
+                    ui.label(egui::RichText::new("/").size(10.0).color(crate::app::TEXT_CAPTION));
+                    let s3d_active = self.ui_state.profile_mode == ProfileMode::Surface3D;
+                    let s3d_text = egui::RichText::new("3D").size(10.0).color(
+                        if s3d_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(s3d_text).frame(false)).clicked() && !s3d_active {
+                        self.ui_state.profile_mode = ProfileMode::Surface3D;
+                        *self.data_generation += 1;
+                    }
+
+                    // Close button (right-aligned)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let close_text = egui::RichText::new("x").monospace().size(11.0)
+                            .color(crate::app::TEXT_CAPTION);
+                        if ui.add(egui::Button::new(close_text).frame(false)).clicked() {
+                            self.ui_state.profile_split = false;
+                        }
+                    });
+                });
+            }
+
+            // Draw profile/heatmap below toolbar
+            let prof_inner = egui::Rect::from_min_max(
+                egui::pos2(prof_rect.left() + 4.0, prof_rect.top() + toolbar_h + 2.0),
+                egui::pos2(prof_rect.right() - 4.0, prof_rect.bottom() - 4.0),
+            );
+            let mut prof_ui = ui.new_child(egui::UiBuilder::new().max_rect(prof_inner));
+            match self.ui_state.profile_mode {
+                ProfileMode::TimeLevelHeatmap if self.profile_renderer.has_heatmap() => {
+                    self.profile_renderer.paint_heatmap(&mut prof_ui);
+                }
+                ProfileMode::Surface3D if self.profile_renderer.has_heatmap() => {
+                    self.profile_renderer.paint_surface3d(&mut prof_ui, self.ui_state.colormap);
+                }
+                _ => {
+                    self.profile_renderer.paint(&mut prof_ui);
+                }
+            }
+        }
+
+        ui.allocate_rect(full_central, egui::Sense::hover());
     }
 
     /// Helper: draw a section header label.
