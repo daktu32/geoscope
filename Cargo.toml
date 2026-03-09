@@ -10,7 +10,8 @@ keywords = ["gfd", "visualization", "netcdf", "spectral-method"]
 categories = ["visualization", "science"]
 
 [dependencies]
-eframe = { version = "0.33", features = ["wgpu"] }
+eframe = { version = "0.33", features = ["wgpu", "persistence"] }
+serde = { version = "1", features = ["derive"] }
 egui = "0.33"
 egui_dock = "0.18"
 egui-wgpu = "0.33"

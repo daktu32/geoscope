@@ -42,16 +42,34 @@ impl ProfileRenderer {
         self.current_index = index;
     }
 
+    /// Override the display range (value axis min/max) for the profile line graph.
+    pub fn set_display_range(&mut self, min: f32, max: f32) {
+        if let Some(ref mut data) = self.data {
+            data.min = min;
+            data.max = max;
+        }
+    }
+
     pub fn set_heatmap_data(&mut self, data: TimeLevelData, colormap: Colormap) {
+        self.set_heatmap_data_with_range(data, colormap, None);
+    }
+
+    pub fn set_heatmap_data_with_range(
+        &mut self,
+        data: TimeLevelData,
+        colormap: Colormap,
+        display_range: Option<(f32, f32)>,
+    ) {
         let w = data.n_time;
         let h = data.n_level;
+        let (dmin, dmax) = display_range.unwrap_or((data.min, data.max));
         let lut = colormap_lut(colormap);
         let mut pixels = Vec::with_capacity(w * h * 4);
         // Row = level (top=0), Col = time
         for lev in 0..h {
             for t in 0..w {
                 let val = data.values[t * h + lev]; // data is [time][level]
-                let [r, g, b, a] = colormap_rgba_with_lut(val, data.min, data.max, &lut);
+                let [r, g, b, a] = colormap_rgba_with_lut(val, dmin, dmax, &lut);
                 pixels.extend_from_slice(&[r, g, b, a]);
             }
         }
@@ -123,6 +141,7 @@ impl ProfileRenderer {
         let axis_range = axis_max - axis_min;
 
         // Compute points for the data line
+        // Convention: y-axis = level (top=first level, bottom=last), x-axis = value
         let points: Option<Vec<egui::Pos2>> = if n >= 2 && range.abs() > 1e-20 {
             Some(
                 (0..n)
@@ -134,8 +153,8 @@ impl ProfileRenderer {
                         };
                         let v = (data.values[i] - data.min) / range;
                         egui::pos2(
-                            plot.left() + t * plot.width(),
-                            plot.bottom() - v * plot.height(),
+                            plot.left() + v * plot.width(),
+                            plot.top() + t * plot.height(),
                         )
                     })
                     .collect(),
@@ -165,14 +184,14 @@ impl ProfileRenderer {
             painter.line_segment([plot.left_bottom(), plot.right_bottom()], axis_stroke);
             painter.line_segment([plot.left_bottom(), plot.left_top()], axis_stroke);
 
-            // --- X-axis ticks (axis_values) ---
+            // --- X-axis ticks (value range) ---
             let x_tick_count = compute_tick_count(n, 7);
             let tick_font = egui::FontId::monospace(9.0);
 
             for i in 0..x_tick_count {
                 let frac = i as f32 / (x_tick_count - 1).max(1) as f32;
                 let x = plot.left() + frac * plot.width();
-                let val = axis_min + frac as f64 * axis_range;
+                let val = data.min as f64 + frac as f64 * range as f64;
 
                 painter.line_segment(
                     [egui::pos2(x, plot.bottom()), egui::pos2(x, plot.bottom() + 3.0)],
@@ -187,22 +206,22 @@ impl ProfileRenderer {
                 );
             }
 
-            // X-axis label
+            // X-axis label (value)
             painter.text(
                 egui::pos2(plot.center().x, rect.bottom() - 4.0),
                 egui::Align2::CENTER_BOTTOM,
-                &data.axis_label,
+                &data.value_label,
                 egui::FontId::monospace(10.0),
                 crate::app::TEXT_SECONDARY,
             );
 
-            // --- Y-axis ticks (value range) ---
+            // --- Y-axis ticks (level/axis_values, top=first, bottom=last) ---
             let y_tick_count = compute_tick_count(n, 6);
 
             for i in 0..y_tick_count {
                 let frac = i as f32 / (y_tick_count - 1).max(1) as f32;
-                let y = plot.bottom() - frac * plot.height();
-                let val = data.min as f64 + frac as f64 * range as f64;
+                let y = plot.top() + frac * plot.height();
+                let val = axis_min + frac as f64 * axis_range;
 
                 painter.line_segment(
                     [egui::pos2(plot.left() - 3.0, y), egui::pos2(plot.left(), y)],
@@ -225,11 +244,11 @@ impl ProfileRenderer {
                 }
             }
 
-            // Y-axis label
+            // Y-axis label (level coordinate)
             painter.text(
                 egui::pos2(rect.left() + 4.0, plot.center().y),
                 egui::Align2::LEFT_CENTER,
-                &data.value_label,
+                &data.axis_label,
                 egui::FontId::monospace(10.0),
                 crate::app::TEXT_SECONDARY,
             );
@@ -251,10 +270,10 @@ impl ProfileRenderer {
                     let pt = points[idx];
                     let val = data.values[idx];
 
-                    // Vertical line (full height, semi-transparent)
+                    // Horizontal line at current level (full width, semi-transparent)
                     let playhead_color = egui::Color32::from_rgba_premultiplied(255, 200, 60, 140);
                     painter.line_segment(
-                        [egui::pos2(pt.x, plot.top()), egui::pos2(pt.x, plot.bottom())],
+                        [egui::pos2(plot.left(), pt.y), egui::pos2(plot.right(), pt.y)],
                         egui::Stroke::new(1.0, playhead_color),
                     );
 
@@ -264,10 +283,10 @@ impl ProfileRenderer {
 
                     // Value label near the dot
                     let label = format_tick_value(val as f64);
-                    let label_offset = if pt.y - plot.top() > 30.0 {
-                        egui::vec2(8.0, -16.0) // above
+                    let label_offset = if pt.x + 80.0 < plot.right() {
+                        egui::vec2(8.0, -16.0) // right of dot
                     } else {
-                        egui::vec2(8.0, 10.0)  // below
+                        egui::vec2(-60.0, -16.0) // left of dot
                     };
                     let label_pos = pt + label_offset;
                     let label_font = egui::FontId::monospace(10.0);
@@ -304,13 +323,13 @@ impl ProfileRenderer {
                         crosshair_stroke,
                     );
 
-                    // Find nearest data point
+                    // Find nearest data point (by y = level axis)
                     let mut best_idx = 0;
                     let mut best_dist = f32::INFINITY;
                     for (i, &pt) in points.iter().enumerate() {
-                        let dx = (pt.x - hover_pos.x).abs();
-                        if dx < best_dist {
-                            best_dist = dx;
+                        let dy = (pt.y - hover_pos.y).abs();
+                        if dy < best_dist {
+                            best_dist = dy;
                             best_idx = i;
                         }
                     }
@@ -479,157 +498,6 @@ impl ProfileRenderer {
         );
     }
 
-    /// Paint a 3D surface plot using isometric projection.
-    /// Axes: x=time (depth), y=value (lateral displacement), z=level (vertical, screen up/down).
-    /// This keeps the vertical axis aligned with the physical height dimension.
-    pub fn paint_surface3d(&self, ui: &mut egui::Ui, colormap: Colormap) {
-        let bg_rect = ui.available_rect_before_wrap();
-        super::globe::paint_viewport_background(ui.painter(), bg_rect);
-
-        let Some(data) = &self.heatmap_data else {
-            ui.centered_and_justified(|ui| {
-                ui.label(
-                    egui::RichText::new("No time-level data (needs both time and level dimensions)")
-                        .color(crate::app::TEXT_CAPTION),
-                );
-            });
-            return;
-        };
-
-        let painter = ui.painter();
-        let available = ui.available_rect_before_wrap();
-
-        // Title
-        painter.text(
-            egui::pos2(available.center().x, available.min.y + 4.0),
-            egui::Align2::CENTER_TOP,
-            &self.title,
-            egui::FontId::proportional(12.0),
-            crate::app::TEXT_HEADING,
-        );
-
-        let margin = 40.0;
-        let plot_rect = egui::Rect::from_min_max(
-            egui::pos2(available.min.x + margin, available.min.y + margin),
-            egui::pos2(available.max.x - margin * 0.5, available.max.y - margin * 0.5),
-        );
-        if plot_rect.width() < 50.0 || plot_rect.height() < 50.0 { return; }
-
-        // Downsample for performance
-        let step_t = (data.n_time / 40).max(1);
-        let step_l = (data.n_level / 20).max(1);
-        let nt = (data.n_time + step_t - 1) / step_t;
-        let nl = (data.n_level + step_l - 1) / step_l;
-
-        // Isometric projection:
-        //   x-axis = time  → goes into the screen (right-down in iso)
-        //   y-axis = value → lateral displacement (left-right, perpendicular to time)
-        //   z-axis = level → vertical (screen up = higher level index)
-        let cx = plot_rect.center().x - plot_rect.width() * 0.1;
-        let cy = plot_rect.center().y + plot_rect.height() * 0.05;
-
-        let scale_t = plot_rect.width() * 0.35 / nt.max(1) as f32;
-        let val_range = (data.max - data.min).max(1e-10);
-        let scale_val = plot_rect.width() * 0.2;  // max lateral displacement
-        let scale_lev = plot_rect.height() * 0.7 / nl.max(1) as f32;
-
-        // Isometric basis vectors
-        let at = egui::vec2(0.87 * scale_t, 0.30 * scale_t);    // time → right-down (depth)
-        let av = egui::vec2(-0.87, 0.30);                         // value → left-down (lateral)
-        let al = egui::vec2(0.0, -scale_lev);                     // level → straight up
-
-        let lut = colormap_lut(colormap);
-
-        // Project: (time_i, level_i) → screen pos, also returns value
-        let project = |ti: usize, li: usize| -> (egui::Pos2, f32) {
-            let t_idx = (ti * step_t).min(data.n_time - 1);
-            let l_idx = (li * step_l).min(data.n_level - 1);
-            let val = data.values[t_idx * data.n_level + l_idx];
-            let val_norm = (val - data.min) / val_range; // [0, 1]
-            // level goes up, time goes into depth, value displaces laterally
-            let sx = cx + at.x * ti as f32 + av.x * val_norm * scale_val;
-            let sy = cy + at.y * ti as f32 + av.y * val_norm * scale_val + al.y * li as f32;
-            (egui::pos2(sx, sy), val)
-        };
-
-        // Draw back-to-front: far time first, top level first
-        for ti in 0..nt.saturating_sub(1) {
-            for li in (0..nl.saturating_sub(1)).rev() {
-                let (p00, v00) = project(ti, li);
-                let (p10, _) = project(ti + 1, li);
-                let (p11, _) = project(ti + 1, li + 1);
-                let (p01, _) = project(ti, li + 1);
-
-                let [r, g, b, _] = colormap_rgba_with_lut(v00, data.min, data.max, &lut);
-                let fill = egui::Color32::from_rgb(r, g, b);
-
-                // Filled quad
-                let mesh = egui::Mesh {
-                    indices: vec![0, 1, 2, 0, 2, 3],
-                    vertices: vec![
-                        egui::epaint::Vertex { pos: p00, uv: egui::epaint::WHITE_UV, color: fill },
-                        egui::epaint::Vertex { pos: p10, uv: egui::epaint::WHITE_UV, color: fill },
-                        egui::epaint::Vertex { pos: p11, uv: egui::epaint::WHITE_UV, color: fill },
-                        egui::epaint::Vertex { pos: p01, uv: egui::epaint::WHITE_UV, color: fill },
-                    ],
-                    texture_id: egui::TextureId::default(),
-                };
-                painter.add(egui::Shape::mesh(mesh));
-
-                // Wireframe
-                let wire_color = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 50);
-                let wire = egui::Stroke::new(0.3, wire_color);
-                painter.line_segment([p00, p10], wire);
-                painter.line_segment([p00, p01], wire);
-            }
-        }
-
-        // Draw axes from bottom-near corner
-        let origin = egui::pos2(cx, cy);
-        let axis_color = egui::Color32::from_gray(120);
-        let axis_stroke = egui::Stroke::new(1.0, axis_color);
-        let font = egui::FontId::proportional(10.0);
-
-        // Time axis (depth)
-        let t_end = egui::pos2(
-            origin.x + at.x * (nt - 1) as f32,
-            origin.y + at.y * (nt - 1) as f32,
-        );
-        painter.line_segment([origin, t_end], axis_stroke);
-        painter.text(t_end + egui::vec2(8.0, 4.0), egui::Align2::LEFT_TOP,
-            &data.time_label, font.clone(), axis_color);
-
-        // Level axis (vertical, up)
-        let l_end = egui::pos2(
-            origin.x + al.x * (nl - 1) as f32,
-            origin.y + al.y * (nl - 1) as f32,
-        );
-        painter.line_segment([origin, l_end], axis_stroke);
-        painter.text(l_end + egui::vec2(-8.0, -4.0), egui::Align2::RIGHT_BOTTOM,
-            &data.level_label, font.clone(), axis_color);
-
-        // Value axis (lateral)
-        let v_end = egui::pos2(
-            origin.x + av.x * scale_val,
-            origin.y + av.y * scale_val,
-        );
-        painter.line_segment([origin, v_end], axis_stroke);
-        painter.text(v_end + egui::vec2(-8.0, 4.0), egui::Align2::RIGHT_TOP,
-            &data.value_label, font.clone(), axis_color);
-
-        // Playhead: highlight current time slice as a vertical line of segments
-        if let Some(t_idx) = self.current_index {
-            let ti = t_idx / step_t;
-            if ti < nt {
-                for li in 0..nl.saturating_sub(1) {
-                    let (p0, _) = project(ti, li);
-                    let (p1, _) = project(ti, li + 1);
-                    painter.line_segment([p0, p1],
-                        egui::Stroke::new(1.5, egui::Color32::from_rgb(255, 200, 50)));
-                }
-            }
-        }
-    }
 }
 
 /// Compute a reasonable number of ticks (between 2 and max_ticks).

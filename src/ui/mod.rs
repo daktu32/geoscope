@@ -14,7 +14,7 @@ use crate::renderer::trajectory::TrajectoryOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
 
 /// View mode for the viewport.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ViewMode {
     #[default]
     Globe,
@@ -34,19 +34,17 @@ pub struct HoverInfo {
 }
 
 /// Profile view mode.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ProfileMode {
     #[default]
     Vertical,
     TimeSeries,
-    /// Time × Level heatmap at a fixed (lon, lat) point.
+    /// Time × Level Hovmöller at a fixed (lon, lat) point.
     TimeLevelHeatmap,
-    /// 3D surface plot (x=time, y=level, z=value).
-    Surface3D,
 }
 
 /// Colormap selection.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum Colormap {
     // Sequential
     #[default]
@@ -163,7 +161,7 @@ pub struct UiState {
 }
 
 /// Range mode for colormap scaling.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum RangeMode {
     /// Auto-scale from the currently displayed slice.
     #[default]
@@ -613,62 +611,69 @@ impl GeoScopeTabViewer<'_> {
                             })
                             .unwrap_or_else(|| format!("{lev}"));
 
-                        // Get total height BEFORE entering inner layout
-                        let panel_h = ui.available_height();
-                        // Fixed slider height (not proportional — keeps it compact)
-                        let slider_h = 160.0_f32.min(panel_h - 80.0).max(40.0);
-                        // Content: label(~14) + gap(4) + slider + gap(4) + value(~14) + index(~12) ≈ slider_h + 48
-                        let content_h = slider_h + 52.0;
-                        let top_pad = ((panel_h - content_h) / 2.0).max(0.0);
-
-                        ui.add_space(top_pad);
-
-                        ui.with_layout(egui::Layout::top_down(egui::Align::Center), |ui| {
-                            // "Level" header — makes purpose obvious
+                        // "Level" header (centered manually)
+                        ui.vertical_centered(|ui| {
                             ui.label(
                                 egui::RichText::new("Level")
                                     .size(10.0)
                                     .strong()
                                     .color(crate::app::TEXT_HEADING),
                             );
-                            // Dimension name (e.g. "sig", "lev", "plev")
                             ui.label(
                                 egui::RichText::new(&level_name)
                                     .monospace()
                                     .size(9.0)
                                     .color(crate::app::TEXT_CAPTION),
                             );
+                        });
 
-                            ui.add_space(4.0);
+                        ui.add_space(4.0);
 
-                            // Vertical slider
+                        // Compute slider height from remaining space
+                        let remaining = ui.available_height();
+                        let bottom_reserve = 40.0;
+                        let slider_h = if self.ui_state.profile_split
+                            && self.ui_state.profile_point.is_some()
+                        {
+                            // Match profile plot area (~60% of remaining; profile has
+                            // its own toolbar, axis labels, margins that eat ~40%)
+                            (remaining * 0.6).max(60.0)
+                        } else {
+                            160.0_f32.min(remaining - bottom_reserve).max(40.0)
+                        };
+
+                        // Vertical slider — spacing().slider_width controls rail length
+                        let changed = ui.vertical_centered(|ui| {
+                            ui.spacing_mut().slider_width = slider_h;
                             let slider = egui::Slider::new(&mut lev, 0..=max_lev)
                                 .vertical()
                                 .show_value(false);
-                            if ui.add_sized([28.0, slider_h], slider).changed() {
-                                self.ui_state.level_index = lev;
-                                if let Some(fi) = self.data_store.active_file {
-                                    if let Some(file) = self.data_store.files.get(fi) {
-                                        if let Some(vi) = file.selected_variable {
-                                            let t = self.ui_state.time_index;
-                                            if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
-                                                *self.data_generation += 1;
-                                            }
+                            ui.add(slider).changed()
+                        }).inner;
+                        if changed {
+                            self.ui_state.level_index = lev;
+                            if let Some(fi) = self.data_store.active_file {
+                                if let Some(file) = self.data_store.files.get(fi) {
+                                    if let Some(vi) = file.selected_variable {
+                                        let t = self.ui_state.time_index;
+                                        if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
+                                            *self.data_generation += 1;
                                         }
                                     }
                                 }
                             }
+                        }
 
-                            ui.add_space(4.0);
+                        ui.add_space(4.0);
 
-                            // Current coordinate value
+                        // Bottom labels
+                        ui.vertical_centered(|ui| {
                             ui.label(
                                 egui::RichText::new(&coord_str)
                                     .monospace()
                                     .size(11.0)
                                     .color(crate::app::TEXT_SECONDARY),
                             );
-                            // Index indicator
                             ui.label(
                                 egui::RichText::new(format!("{}/{}", lev, max_lev))
                                     .monospace()
@@ -820,15 +825,10 @@ impl GeoScopeTabViewer<'_> {
         let mut globe_proj_info: Option<(egui::Rect, [[f32; 4]; 4], [[f32; 4]; 4])> = None;
         match self.ui_state.view_mode {
             ViewMode::Globe => {
-                self.globe_renderer.paint(&mut child_ui);
-                // Overlays on Globe
-                let avail = central.size();
-                let pad_x = (avail.x * 0.05).max(8.0);
-                let pad_y = (avail.y * 0.05).max(8.0);
-                let padded = egui::vec2(avail.x - pad_x * 2.0, avail.y - pad_y * 2.0);
-                let globe_rect = egui::Rect::from_center_size(central.center(), padded);
+                // paint() returns the exact padded rect used for GPU rendering
+                let globe_rect = self.globe_renderer.paint(&mut child_ui);
 
-                // Shared view/view_proj for all Globe overlays
+                // Shared view/view_proj for all Globe overlays — use the SAME rect as GPU
                 let (view_for_overlays, view_proj_for_overlays) = crate::renderer::common::build_view_proj(
                     self.globe_renderer.cam_lon,
                     self.globe_renderer.cam_lat,
@@ -861,18 +861,19 @@ impl GeoScopeTabViewer<'_> {
                 }
                 globe_proj_info = Some((globe_rect, view_for_overlays, view_proj_for_overlays));
                 // Globe click → set profile point
-                // Use inverse of view matrix (transpose of rotation) to go screen → world
+                // Use the SAME view matrix (transposed) for inverse — guarantees exact match with marker
                 {
                     let clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
                     let hover_pos = child_ui.input(|i| i.pointer.hover_pos());
                     if clicked && !child_ui.input(|i| i.pointer.is_decidedly_dragging()) {
                         if let Some(pos) = hover_pos {
                             if globe_rect.contains(pos) {
-                                // Screen → NDC (clip space before proj)
+                                // Screen → NDC
                                 let ndx = (pos.x - globe_rect.center().x) / (globe_rect.width() * 0.5);
                                 let ndy = -(pos.y - globe_rect.center().y) / (globe_rect.height() * 0.5);
 
-                                // Inverse projection: undo the aspect/zoom scaling
+                                // Inverse projection: undo aspect/zoom scaling
+                                // Use the SAME (sx, sy) as build_view_proj
                                 let aspect = globe_rect.width() / globe_rect.height().max(1.0);
                                 let zoom = self.globe_renderer.zoom;
                                 let (sx, sy) = if aspect > 1.0 {
@@ -880,37 +881,26 @@ impl GeoScopeTabViewer<'_> {
                                 } else {
                                     (zoom, zoom * aspect)
                                 };
-                                let vx = ndx / sx;  // view-space x
-                                let vy = ndy / sy;  // view-space y
+                                let vx = ndx / sx;
+                                let vy = ndy / sy;
 
                                 let r2 = vx * vx + vy * vy;
                                 if r2 <= 1.0 {
-                                    let vz = (1.0 - r2).sqrt(); // view-space z (into screen)
+                                    let vz = (1.0 - r2).sqrt();
 
-                                    // Inverse view: view = rot_x * rot_y, so inverse = rot_y^T * rot_x^T
-                                    let cam_lon = self.globe_renderer.cam_lon;
-                                    let cam_lat = self.globe_renderer.cam_lat;
-                                    let (sin_lon, cos_lon) = cam_lon.sin_cos();
-                                    let (sin_lat, cos_lat) = cam_lat.sin_cos();
+                                    // Inverse view using the SAME view matrix (transpose of orthogonal = inverse)
+                                    let v = &view_for_overlays;
+                                    // view^T * [vx, vy, vz]
+                                    let wx = v[0][0] * vx + v[1][0] * vy + v[2][0] * vz;
+                                    let wy = v[0][1] * vx + v[1][1] * vy + v[2][1] * vz;
+                                    let wz = v[0][2] * vx + v[1][2] * vy + v[2][2] * vz;
 
-                                    // rot_x^T: undo latitude rotation
-                                    let ix = vx;
-                                    let iy = cos_lat * vy + sin_lat * vz;
-                                    let iz = -sin_lat * vy + cos_lat * vz;
-
-                                    // rot_y^T: undo longitude rotation
-                                    let wx = cos_lon * ix + sin_lon * iz;
-                                    let wy = iy;
-                                    let wz = -sin_lon * ix + cos_lon * iz;
-
-                                    // World coords → lon/lat (Globe mesh convention)
-                                    // Globe mesh: x = cos_lat*cos(theta), y = sin(lat_rad), z = cos_lat*sin(theta)
-                                    // So lon = atan2(z, x), lat_rad = asin(y)
+                                    // World → lon/lat (Globe mesh: y = sin(lat), x = cos(lat)*cos(lon), z = cos(lat)*sin(lon))
                                     let lat_rad = wy.asin();
-                                    let lon_rad = wz.atan2(wx);    // atan2(sin_theta, cos_theta)
+                                    let lon_rad = wz.atan2(wx);
 
                                     let lon_deg = lon_rad.to_degrees();
-                                    let lat_deg = -lat_rad.to_degrees(); // undo Globe mesh lat flip
+                                    let lat_deg = lat_rad.to_degrees();
 
                                     let u = ((lon_deg + 180.0) / 360.0).rem_euclid(1.0);
                                     let v = (90.0 - lat_deg) / 180.0;
@@ -1153,7 +1143,7 @@ impl GeoScopeTabViewer<'_> {
                             let lon_deg = u * 360.0 - 180.0;
                             let lat_deg = 90.0 - v * 180.0;
                             let theta = lon_deg.to_radians();
-                            let lat_rad = (-lat_deg).to_radians(); // Globe mesh lat flip
+                            let lat_rad = lat_deg.to_radians();
                             let cos_lat = lat_rad.cos();
                             let x = cos_lat * theta.cos();
                             let y = lat_rad.sin();
@@ -1248,16 +1238,6 @@ impl GeoScopeTabViewer<'_> {
                         self.ui_state.profile_mode = ProfileMode::TimeLevelHeatmap;
                         *self.data_generation += 1;
                     }
-                    ui.label(egui::RichText::new("/").size(10.0).color(crate::app::TEXT_CAPTION));
-                    let s3d_active = self.ui_state.profile_mode == ProfileMode::Surface3D;
-                    let s3d_text = egui::RichText::new("3D").size(10.0).color(
-                        if s3d_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
-                    );
-                    if ui.add(egui::Button::new(s3d_text).frame(false)).clicked() && !s3d_active {
-                        self.ui_state.profile_mode = ProfileMode::Surface3D;
-                        *self.data_generation += 1;
-                    }
-
                     // Close button (right-aligned)
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         let close_text = egui::RichText::new("x").monospace().size(11.0)
@@ -1278,9 +1258,6 @@ impl GeoScopeTabViewer<'_> {
             match self.ui_state.profile_mode {
                 ProfileMode::TimeLevelHeatmap if self.profile_renderer.has_heatmap() => {
                     self.profile_renderer.paint_heatmap(&mut prof_ui);
-                }
-                ProfileMode::Surface3D if self.profile_renderer.has_heatmap() => {
-                    self.profile_renderer.paint_surface3d(&mut prof_ui, self.ui_state.colormap);
                 }
                 _ => {
                     self.profile_renderer.paint(&mut prof_ui);
@@ -1370,10 +1347,10 @@ impl GeoScopeTabViewer<'_> {
                     ui.separator();
                     ui.add_space(6.0);
 
-                    // --- Projection ---
-                    Self::section_header(ui, "Projection");
-                    ui.add_space(3.0);
+                    // --- Projection (Map view only) ---
                     if self.ui_state.view_mode == ViewMode::Map {
+                        Self::section_header(ui, "Projection");
+                        ui.add_space(3.0);
                         egui::ComboBox::from_id_salt("projection_combo_main")
                             .selected_text(match self.ui_state.map_projection {
                                 MapProjection::Equirectangular => "Equirectangular",
@@ -1387,21 +1364,6 @@ impl GeoScopeTabViewer<'_> {
                                 ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Mollweide, "Mollweide");
                                 ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarNorth, "Polar (North)");
                                 ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarSouth, "Polar (South)");
-                            });
-                    } else {
-                        let proj_label = match self.ui_state.view_mode {
-                            ViewMode::Globe => "Orthographic",
-                            ViewMode::Hovmoller => "Time-Longitude",
-                            ViewMode::Spectrum => "Log-Log",
-                            ViewMode::CrossSection => "Level-Space",
-                            ViewMode::Profile => "Line Graph",
-                            ViewMode::Map => unreachable!(),
-                        };
-                        egui::ComboBox::from_id_salt("projection_combo_main")
-                            .selected_text(proj_label)
-                            .width(ui.available_width() - 8.0)
-                            .show_ui(ui, |_ui| {
-                                // Read-only for non-Map views
                             });
                     }
 

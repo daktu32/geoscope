@@ -16,6 +16,50 @@ use crate::renderer::trajectory::TrajectoryOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
 use crate::ui::{Colormap, GeoScopeTabViewer, Tab};
 
+const APP_KEY: &str = "geoscope-session";
+
+/// Serializable session state for persistence across restarts.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SessionState {
+    // Opened files & selected variable
+    file_paths: Vec<String>,
+    active_file: Option<usize>,
+    selected_variables: Vec<Option<usize>>,
+    // View settings
+    view_mode: crate::ui::ViewMode,
+    colormap: crate::ui::Colormap,
+    map_projection: crate::renderer::map::MapProjection,
+    interpolated: bool,
+    // Indices
+    time_index: usize,
+    level_index: usize,
+    // Range
+    range_mode: crate::ui::RangeMode,
+    manual_min: f32,
+    manual_max: f32,
+    // Camera — Globe
+    globe_cam_lon: f32,
+    globe_cam_lat: f32,
+    globe_zoom: f32,
+    // Camera — Map
+    map_pan_x: f32,
+    map_pan_y: f32,
+    map_zoom: f32,
+    // Overlays
+    vector_overlay_enabled: bool,
+    vector_u_var: Option<usize>,
+    vector_v_var: Option<usize>,
+    vector_density: usize,
+    vector_scale: f32,
+    contour_enabled: bool,
+    contour_levels: usize,
+    streamline_enabled: bool,
+    // Profile
+    profile_mode: crate::ui::ProfileMode,
+    profile_split: bool,
+    profile_point: Option<(usize, usize)>,
+}
+
 // ---------------------------------------------------------------------------
 // Design tokens — unified color system
 // ---------------------------------------------------------------------------
@@ -73,6 +117,9 @@ pub struct GeoScopeApp {
     vector_generation: u64,
     profile_generation: u64,
     profile_is_time_series: bool,
+    /// Track profile_point changes separately so clicks reload even during animation
+    last_profile_point: Option<(usize, usize)>,
+    last_profile_mode: crate::ui::ProfileMode,
     contour_generation: u64,
     streamline_generation: u64,
     trajectory_generation: u64,
@@ -92,18 +139,94 @@ impl GeoScopeApp {
     pub fn new(cc: &CreationContext<'_>) -> Self {
         apply_theme(&cc.egui_ctx);
 
-        let globe_renderer = GlobeRenderer::new(cc);
+        let mut globe_renderer = GlobeRenderer::new(cc);
 
         let mut dock_state = DockState::new(vec![Tab::Viewport]);
         let surface = dock_state.main_surface_mut();
         surface.split_left(NodeIndex::root(), 0.15, vec![Tab::DataBrowser]);
         surface.split_right(NodeIndex::root(), 0.80, vec![Tab::Inspector, Tab::CodePanel]);
 
+        let mut ui_state = crate::ui::UiState::default();
+        let mut map_renderer = MapRenderer::new();
+        let mut data_store = DataStore::new();
+        let mut restored_files = false;
+
+        // Restore session state from storage
+        if let Some(storage) = cc.storage {
+            if let Some(state) = eframe::get_value::<SessionState>(storage, APP_KEY) {
+                // Re-open files
+                for (i, path_str) in state.file_paths.iter().enumerate() {
+                    let path = std::path::Path::new(path_str);
+                    if path.exists() {
+                        if let Ok(()) = data_store.open_file(path) {
+                            let fi = data_store.files.len() - 1;
+                            // Restore selected variable
+                            if let Some(&Some(vi)) = state.selected_variables.get(i) {
+                                if vi < data_store.files[fi].variables.len() {
+                                    data_store.files[fi].selected_variable = Some(vi);
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Some(af) = state.active_file {
+                    if af < data_store.files.len() {
+                        data_store.active_file = Some(af);
+                    }
+                }
+                restored_files = !data_store.files.is_empty();
+
+                // Restore UI state
+                ui_state.view_mode = state.view_mode;
+                ui_state.colormap = state.colormap;
+                ui_state.map_projection = state.map_projection;
+                ui_state.interpolated = state.interpolated;
+                ui_state.time_index = state.time_index;
+                ui_state.level_index = state.level_index;
+                ui_state.range_mode = state.range_mode;
+                ui_state.manual_min = state.manual_min;
+                ui_state.manual_max = state.manual_max;
+                ui_state.vector_overlay_enabled = state.vector_overlay_enabled;
+                ui_state.vector_u_var = state.vector_u_var;
+                ui_state.vector_v_var = state.vector_v_var;
+                ui_state.vector_density = state.vector_density;
+                ui_state.vector_scale = state.vector_scale;
+                ui_state.contour_enabled = state.contour_enabled;
+                ui_state.contour_levels = state.contour_levels;
+                ui_state.streamline_enabled = state.streamline_enabled;
+                ui_state.profile_mode = state.profile_mode;
+                ui_state.profile_split = state.profile_split;
+                ui_state.profile_point = state.profile_point;
+
+                // Restore camera
+                globe_renderer.cam_lon = state.globe_cam_lon;
+                globe_renderer.cam_lat = state.globe_cam_lat;
+                globe_renderer.zoom = state.globe_zoom;
+                map_renderer.pan_x = state.map_pan_x;
+                map_renderer.pan_y = state.map_pan_y;
+                map_renderer.zoom = state.map_zoom;
+            }
+        }
+
+        // Load field data for the active file's selected variable at restored indices
+        let data_generation = if restored_files {
+            if let Some(fi) = data_store.active_file {
+                if let Some(vi) = data_store.files[fi].selected_variable {
+                    let _ = data_store.load_field_at(
+                        fi, vi, ui_state.time_index, ui_state.level_index,
+                    );
+                }
+            }
+            1_u64
+        } else {
+            0_u64
+        };
+
         Self {
             dock_state,
-            data_store: DataStore::new(),
+            data_store,
             globe_renderer,
-            map_renderer: MapRenderer::new(),
+            map_renderer,
             hovmoller_renderer: HovmollerRenderer::new(),
             spectrum_renderer: SpectrumRenderer::new(),
             cross_section_renderer: CrossSectionRenderer::new(),
@@ -112,14 +235,16 @@ impl GeoScopeApp {
             contour_overlay: ContourOverlay::new(),
             streamline_overlay: StreamlineOverlay::new(),
             trajectory_overlay: TrajectoryOverlay::new(),
-            ui_state: crate::ui::UiState::default(),
-            data_generation: 0,
+            ui_state,
+            data_generation,
             gpu_generation: 0,
             last_colormap: crate::ui::Colormap::default(),
             hovmoller_generation: 0,
             cross_section_generation: 0,
             vector_generation: 0,
             profile_generation: 0,
+            last_profile_point: None,
+            last_profile_mode: crate::ui::ProfileMode::Vertical,
             profile_is_time_series: false,
             contour_generation: 0,
             streamline_generation: 0,
@@ -281,6 +406,46 @@ impl GeoScopeApp {
 }
 
 impl eframe::App for GeoScopeApp {
+    fn auto_save_interval(&self) -> std::time::Duration {
+        // Only save on app exit, not during runtime (avoids stuttering on slider drag)
+        std::time::Duration::from_secs(u64::MAX)
+    }
+
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        let state = SessionState {
+            file_paths: self.data_store.files.iter().map(|f| f.path.clone()).collect(),
+            active_file: self.data_store.active_file,
+            selected_variables: self.data_store.files.iter().map(|f| f.selected_variable).collect(),
+            view_mode: self.ui_state.view_mode,
+            colormap: self.ui_state.colormap,
+            map_projection: self.ui_state.map_projection,
+            interpolated: self.ui_state.interpolated,
+            time_index: self.ui_state.time_index,
+            level_index: self.ui_state.level_index,
+            range_mode: self.ui_state.range_mode,
+            manual_min: self.ui_state.manual_min,
+            manual_max: self.ui_state.manual_max,
+            globe_cam_lon: self.globe_renderer.cam_lon,
+            globe_cam_lat: self.globe_renderer.cam_lat,
+            globe_zoom: self.globe_renderer.zoom,
+            map_pan_x: self.map_renderer.pan_x,
+            map_pan_y: self.map_renderer.pan_y,
+            map_zoom: self.map_renderer.zoom,
+            vector_overlay_enabled: self.ui_state.vector_overlay_enabled,
+            vector_u_var: self.ui_state.vector_u_var,
+            vector_v_var: self.ui_state.vector_v_var,
+            vector_density: self.ui_state.vector_density,
+            vector_scale: self.ui_state.vector_scale,
+            contour_enabled: self.ui_state.contour_enabled,
+            contour_levels: self.ui_state.contour_levels,
+            streamline_enabled: self.ui_state.streamline_enabled,
+            profile_mode: self.ui_state.profile_mode,
+            profile_split: self.ui_state.profile_split,
+            profile_point: self.ui_state.profile_point,
+        };
+        eframe::set_value(storage, APP_KEY, &state);
+    }
+
     fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         // Re-apply theme on first update (overrides system theme detection)
         if !self.theme_applied {
@@ -729,9 +894,15 @@ impl eframe::App for GeoScopeApp {
         self.vector_overlay.scale = self.ui_state.vector_scale;
 
         // Profile data loading — triggered by Profile view OR split view with a picked point
+        // During animation, skip reload unless the point or mode changed (user interaction).
         let need_profile = self.ui_state.view_mode == crate::ui::ViewMode::Profile
             || (self.ui_state.profile_split && self.ui_state.profile_point.is_some());
-        if need_profile && self.profile_generation != self.data_generation {
+        let profile_point_changed = self.ui_state.profile_point != self.last_profile_point
+            || self.ui_state.profile_mode != self.last_profile_mode;
+        let profile_stale = self.profile_generation != self.data_generation;
+        if need_profile && profile_stale && (!self.ui_state.playing || profile_point_changed) {
+            self.last_profile_point = self.ui_state.profile_point;
+            self.last_profile_mode = self.ui_state.profile_mode;
             if let Some(file_idx) = self.data_store.active_file {
                 if let Some(file) = self.data_store.files.get(file_idx) {
                     if let Some(var_idx) = file.selected_variable {
@@ -753,10 +924,23 @@ impl eframe::App for GeoScopeApp {
                             let mode = self.ui_state.profile_mode;
                             self.profile_is_time_series = false;
 
+                            // Compute display range respecting range_mode
+                            let display_range = match self.ui_state.range_mode {
+                                crate::ui::RangeMode::Global => self.global_range_cache,
+                                crate::ui::RangeMode::Manual => {
+                                    let rmin = self.ui_state.manual_min;
+                                    let rmax = self.ui_state.manual_max;
+                                    if (rmax - rmin).abs() > f32::EPSILON {
+                                        Some((rmin, rmax))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                crate::ui::RangeMode::Slice => None, // use data's own range
+                            };
+
                             match mode {
-                                crate::ui::ProfileMode::TimeLevelHeatmap
-                                | crate::ui::ProfileMode::Surface3D => {
-                                    // Time × Level heatmap / 3D surface (same data)
+                                crate::ui::ProfileMode::TimeLevelHeatmap => {
                                     self.profile_is_time_series = true; // enable playhead
                                     if let Some(tl_data) = self.data_store.load_time_level_data(
                                         file_idx, var_idx, lon_idx, lat_idx,
@@ -765,7 +949,9 @@ impl eframe::App for GeoScopeApp {
                                         self.profile_renderer.set_title(format!(
                                             "{} (lon={}, lat={})", var_name, lon_str, lat_str
                                         ));
-                                        self.profile_renderer.set_heatmap_data(tl_data, self.ui_state.colormap);
+                                        self.profile_renderer.set_heatmap_data_with_range(
+                                            tl_data, self.ui_state.colormap, display_range,
+                                        );
                                     } else {
                                         self.profile_renderer.clear();
                                     }
@@ -822,6 +1008,11 @@ impl eframe::App for GeoScopeApp {
                                         }
                                     }
                                 }
+                            }
+
+                            // Apply display range to profile line graph (Vertical/TimeSeries)
+                            if let Some((dmin, dmax)) = display_range {
+                                self.profile_renderer.set_display_range(dmin, dmax);
                             }
                         }
                     }

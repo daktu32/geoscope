@@ -8,7 +8,7 @@ use super::common::{
 };
 
 /// Map projection mode.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MapProjection {
     #[default]
     Equirectangular,

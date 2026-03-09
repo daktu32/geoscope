@@ -58,7 +58,7 @@ pub struct FieldData {
 }
 
 /// Axis for cross-section slicing.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CrossSectionAxis {
     #[default]
     Latitude,
@@ -230,6 +230,13 @@ impl DataStore {
         validate_netcdf_path(path)?;
 
         let path_str = path.display().to_string();
+
+        // Skip if already opened
+        if let Some(idx) = self.files.iter().position(|f| f.path == path_str) {
+            self.active_file = Some(idx);
+            return Ok(());
+        }
+
         log::info!("Opening file: {path_str}");
 
         let file = netcdf::open(path)

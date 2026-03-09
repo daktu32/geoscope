@@ -561,7 +561,8 @@ impl GlobeRenderer {
         res.data_height = height as u32;
     }
 
-    pub fn paint(&mut self, ui: &mut egui::Ui) {
+    /// Paint the globe and return the padded rect used for rendering.
+    pub fn paint(&mut self, ui: &mut egui::Ui) -> egui::Rect {
         let available = ui.available_size();
         // Add padding so the globe doesn't touch the edges
         let pad_x = (available.x * 0.05).max(8.0);
@@ -583,7 +584,7 @@ impl GlobeRenderer {
                 egui::FontId::proportional(18.0),
                 egui::Color32::from_rgb(100, 160, 200),
             );
-            return;
+            return rect;
         }
 
         if response.dragged() {
@@ -618,6 +619,7 @@ impl GlobeRenderer {
             GlobePaintCallback { camera_uniform },
         );
         ui.painter().add(callback);
+        rect
     }
 }
 
