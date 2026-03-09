@@ -95,22 +95,26 @@ brew install hdf5@1.10
 ```bash
 git clone https://github.com/daktu32/geoscope.git
 cd geoscope
-cargo run --release -- samples/rossby_haurwitz_sample.nc
+
+# Download sample data (requires GitHub CLI)
+./samples/download.sh
+
+cargo run --release -- samples/rossby_haurwitz.nc
 ```
 
 Or launch without arguments and use the **+** button in the Data Browser to open files.
 
 ### Sample Data
 
-Three sample NetCDF files are included in [`samples/`](samples/):
+Full-resolution sample NetCDF files are available from [GitHub Releases](https://github.com/daktu32/geoscope/releases/tag/v0.4-beta):
 
-| File | Description | Try |
-|------|-------------|-----|
-| `rossby_haurwitz_sample.nc` | Rossby-Haurwitz wave | Globe + contour (`C`) + streamlines (`V`) |
-| `beta_gyre_sample.nc` | Beta-plane gyre | Trajectory (`T`) + animation (`Space`) |
-| `held_suarez_sample.nc` | 3D atmosphere (10 levels) | Cross-section (`6`) + level slider |
+| File | Size | Description | Try |
+|------|------|-------------|-----|
+| `rossby_haurwitz.nc` | 62 MB | Rossby-Haurwitz wave, 1001 steps | Globe + contour (`C`) + streamlines (`V`) |
+| `beta_gyre.nc` | 158 MB | Beta-plane gyre + trajectory | Trajectory (`T`) + animation (`Space`) |
+| `held_suarez.nc` | 26 MB | 3D atmosphere, 10 levels | Cross-section (`6`) + level slider |
 
-See [`samples/README.md`](samples/README.md) for details.
+See [`samples/README.md`](samples/README.md) for download instructions.
 
 ## Tech Stack
 
