@@ -185,13 +185,15 @@ impl ContourOverlay {
     }
 
     /// Paint contour lines on the globe view.
+    /// Uses the same coordinate system as the Globe mesh and VectorOverlay:
+    /// UV → (theta, phi) → (sin_phi*cos_theta, cos_phi, sin_phi*sin_theta)
+    /// and the shared view_proj matrix from build_view_proj.
     pub fn paint_on_globe(
         &mut self,
         painter: &egui::Painter,
         plot_rect: egui::Rect,
-        cam_lon: f32,
-        cam_lat: f32,
-        zoom: f32,
+        view: &[[f32; 4]; 4],
+        view_proj: &[[f32; 4]; 4],
     ) {
         if self.uv_segments.is_empty() {
             return;
@@ -199,42 +201,31 @@ impl ContourOverlay {
 
         let n = self.n_levels.max(1);
 
-        // Rotation matrix from camera lon/lat
-        let (sin_lon, cos_lon) = cam_lon.sin_cos();
-        let (sin_lat, cos_lat) = cam_lat.sin_cos();
-
-        let radius = plot_rect.width().min(plot_rect.height()) * 0.45 * zoom;
-        let center = plot_rect.center();
-
         let project = |u: f32, v: f32| -> Option<egui::Pos2> {
-            // UV to lon/lat
-            let lon = u * std::f32::consts::TAU; // [0, 2pi]
-            let lat = (1.0 - v) * std::f32::consts::PI - std::f32::consts::FRAC_PI_2; // [-pi/2, pi/2]
+            // UV to spherical (same as Globe mesh: phi = PI * v, theta = TAU * u)
+            let theta = u * std::f32::consts::TAU;
+            let phi = v * std::f32::consts::PI;
+            let (sin_phi, cos_phi) = phi.sin_cos();
+            let (sin_theta, cos_theta) = theta.sin_cos();
 
-            // Spherical to Cartesian
-            let (sin_lo, cos_lo) = lon.sin_cos();
-            let (sin_la, cos_la) = lat.sin_cos();
-            let x = cos_la * cos_lo;
-            let y = cos_la * sin_lo;
-            let z = sin_la;
+            let pos = [sin_phi * cos_theta, cos_phi, sin_phi * sin_theta];
 
-            // Rotate: first around z-axis by -cam_lon, then around y-axis by -cam_lat
-            let x1 = x * cos_lon + y * sin_lon;
-            let y1 = -x * sin_lon + y * cos_lon;
-            let z1 = z;
-
-            let x2 = x1 * cos_lat + z1 * sin_lat;
-            let _y2 = y1;
-            let z2 = -x1 * sin_lat + z1 * cos_lat;
-
-            // Back-face culling
-            if x2 < 0.0 {
+            // Back-face culling using view matrix
+            let vz = view[2][0] * pos[0] + view[2][1] * pos[1] + view[2][2] * pos[2];
+            if vz < 0.0 {
                 return None;
             }
 
-            // Orthographic projection
-            let sx = center.x + y1 * radius;
-            let sy = center.y - z2 * radius;
+            // Project using view_proj matrix
+            let w = view_proj[3][0] * pos[0] + view_proj[3][1] * pos[1] + view_proj[3][2] * pos[2] + view_proj[3][3];
+            if w.abs() < 1e-6 {
+                return None;
+            }
+            let ndc_x = (view_proj[0][0] * pos[0] + view_proj[0][1] * pos[1] + view_proj[0][2] * pos[2] + view_proj[0][3]) / w;
+            let ndc_y = (view_proj[1][0] * pos[0] + view_proj[1][1] * pos[1] + view_proj[1][2] * pos[2] + view_proj[1][3]) / w;
+
+            let sx = plot_rect.min.x + (ndc_x + 1.0) * 0.5 * plot_rect.width();
+            let sy = plot_rect.min.y + (1.0 - ndc_y) * 0.5 * plot_rect.height();
             Some(egui::pos2(sx, sy))
         };
 

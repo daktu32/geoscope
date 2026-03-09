@@ -16,7 +16,7 @@ impl TrajectoryOverlay {
         Self {
             data: None,
             current_time: 0,
-            trail_length: 50,
+            trail_length: 500,
             color: egui::Color32::from_rgb(0, 200, 180), // teal
             dot_radius: 5.0,
         }
@@ -64,10 +64,12 @@ impl TrajectoryOverlay {
         let current = self.current_time.min(n - 1);
 
         // Convert lon/lat to screen position (equirectangular UV mapping)
+        // Data is latitude-flipped in the texture (row 0 = south at v=0 = top),
+        // so negate lat to match the flipped display.
         let to_screen = |lon_deg: f32, lat_deg: f32| -> egui::Pos2 {
-            // lon [-180, 180] -> u [0, 1], lat [-90, 90] -> v [0, 1] (top=90N)
-            let u = (lon_deg + 180.0) / 360.0;
-            let v = (90.0 - lat_deg) / 180.0;
+            let lon_norm = ((lon_deg % 360.0) + 360.0) % 360.0;
+            let u = lon_norm / 360.0;
+            let v = (90.0 + lat_deg) / 180.0;
 
             // UV -> world coords [-1, 1]
             let wx = u * 2.0 - 1.0;
@@ -86,43 +88,49 @@ impl TrajectoryOverlay {
             egui::pos2(screen_x, screen_y)
         };
 
-        // Trail: draw past points with fading alpha
-        let trail_start = current.saturating_sub(self.trail_length);
-        for i in trail_start..current {
+        // Trail: full path from t=0, recent portion brighter
+        let trail_len = self.trail_length.max(1) as f32;
+        let bright_start = current.saturating_sub(self.trail_length);
+
+        for i in 0..current {
             let (lon0, lat0) = data.points[i];
             let (lon1, lat1) = data.points[i + 1];
             let p0 = to_screen(lon0, lat0);
             let p1 = to_screen(lon1, lat1);
 
-            // Skip if wrapping around the date line
             if (lon1 - lon0).abs() > 180.0 {
                 continue;
             }
 
-            let age = (current - i) as f32 / self.trail_length.max(1) as f32;
-            let alpha = ((1.0 - age) * 200.0) as u8;
+            let alpha = if i >= bright_start {
+                // Recent: fade from 180 (newest) to 80
+                let t = (current - i) as f32 / trail_len;
+                (180.0 - t * 100.0) as u8
+            } else {
+                // Old: dim but visible
+                40
+            };
+
             let trail_color = egui::Color32::from_rgba_unmultiplied(
                 self.color.r(),
                 self.color.g(),
                 self.color.b(),
                 alpha,
             );
-            painter.line_segment([p0, p1], egui::Stroke::new(2.0, trail_color));
+            painter.line_segment([p0, p1], egui::Stroke::new(1.5, trail_color));
         }
 
-        // Future: dimmed dots
-        let future_end = (current + self.trail_length / 4).min(n);
-        for i in (current + 1)..future_end {
-            let (lon, lat) = data.points[i];
-            let p = to_screen(lon, lat);
-            let alpha = 60u8;
-            let future_color = egui::Color32::from_rgba_unmultiplied(
+        // Start marker: small hollow circle at t=0
+        {
+            let (lon0, lat0) = data.points[0];
+            let start_pos = to_screen(lon0, lat0);
+            let start_color = egui::Color32::from_rgba_unmultiplied(
                 self.color.r(),
                 self.color.g(),
                 self.color.b(),
-                alpha,
+                140,
             );
-            painter.circle_filled(p, 1.5, future_color);
+            painter.circle_stroke(start_pos, 3.5, egui::Stroke::new(1.2, start_color));
         }
 
         // Current position: filled circle + white stroke
@@ -152,19 +160,24 @@ impl TrajectoryOverlay {
 
         let current = self.current_time.min(n - 1);
 
-        // Convert lon/lat to screen position via 3D sphere projection
+        // Convert lon/lat to screen position via 3D sphere projection.
+        // Globe mesh maps data row 0 (south) to v=0 (north pole), so the display
+        // is latitude-flipped. Negate lat to match the flipped display.
         let to_screen = |lon_deg: f32, lat_deg: f32| -> Option<egui::Pos2> {
-            let lon = lon_deg.to_radians();
-            let lat = lat_deg.to_radians();
-            let cos_lat = lat.cos();
-            let x = cos_lat * lon.cos();
-            let y = lat.sin();
-            let z = cos_lat * lon.sin();
+            let theta = lon_deg.to_radians();
+            let lat_rad = (-lat_deg).to_radians();
+            let cos_lat = lat_rad.cos();
+            // Globe mesh coords: x = sin_phi*cos_theta = cos_lat*cos_theta
+            //                    y = cos_phi = sin_lat
+            //                    z = sin_phi*sin_theta = cos_lat*sin_theta
+            let x = cos_lat * theta.cos();
+            let y = lat_rad.sin();
+            let z = cos_lat * theta.sin();
 
-            // Apply view matrix for back-face culling
-            let vz = view[2][0] * x + view[2][1] * y + view[2][2] * z + view[2][3];
-            if vz > 0.0 {
-                return None; // behind the globe
+            // Back-face culling (same as VectorOverlay: vz < 0 means facing away)
+            let vz = view[2][0] * x + view[2][1] * y + view[2][2] * z;
+            if vz < 0.0 {
+                return None;
             }
 
             // Apply view_proj to get clip coords
@@ -184,26 +197,47 @@ impl TrajectoryOverlay {
             Some(egui::pos2(screen_x, screen_y))
         };
 
-        // Trail
-        let trail_start = current.saturating_sub(self.trail_length);
-        for i in trail_start..current {
+        // Trail: full path from t=0, recent portion brighter
+        let trail_len = self.trail_length.max(1) as f32;
+        let bright_start = current.saturating_sub(self.trail_length);
+
+        for i in 0..current {
             let (lon0, lat0) = data.points[i];
             let (lon1, lat1) = data.points[i + 1];
 
             if let (Some(p0), Some(p1)) = (to_screen(lon0, lat0), to_screen(lon1, lat1)) {
-                // Skip date-line wrapping
                 if (lon1 - lon0).abs() > 180.0 {
                     continue;
                 }
-                let age = (current - i) as f32 / self.trail_length.max(1) as f32;
-                let alpha = ((1.0 - age) * 200.0) as u8;
+
+                let alpha = if i >= bright_start {
+                    let t = (current - i) as f32 / trail_len;
+                    (180.0 - t * 100.0) as u8
+                } else {
+                    40
+                };
+
                 let trail_color = egui::Color32::from_rgba_unmultiplied(
                     self.color.r(),
                     self.color.g(),
                     self.color.b(),
                     alpha,
                 );
-                painter.line_segment([p0, p1], egui::Stroke::new(2.0, trail_color));
+                painter.line_segment([p0, p1], egui::Stroke::new(1.5, trail_color));
+            }
+        }
+
+        // Start marker: small hollow circle at t=0
+        {
+            let (lon0, lat0) = data.points[0];
+            if let Some(start_pos) = to_screen(lon0, lat0) {
+                let start_color = egui::Color32::from_rgba_unmultiplied(
+                    self.color.r(),
+                    self.color.g(),
+                    self.color.b(),
+                    140,
+                );
+                painter.circle_stroke(start_pos, 3.5, egui::Stroke::new(1.2, start_color));
             }
         }
 

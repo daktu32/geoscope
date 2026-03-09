@@ -739,10 +739,18 @@ impl DataStore {
             return Err("lon and lat variables have different lengths".to_string());
         }
 
+        // Check units: convert radians to degrees if needed
+        let lon_is_radians = is_radians_unit(&lon_var);
+        let lat_is_radians = is_radians_unit(&lat_var);
+
         let points: Vec<(f32, f32)> = lon_vals
             .iter()
             .zip(lat_vals.iter())
-            .map(|(&lo, &la)| (lo as f32, la as f32))
+            .map(|(&lo, &la)| {
+                let lon_deg = if lon_is_radians { lo.to_degrees() } else { lo };
+                let lat_deg = if lat_is_radians { la.to_degrees() } else { la };
+                (lon_deg as f32, lat_deg as f32)
+            })
             .collect();
 
         let name = format!("{}/{}", lon_info.name, lat_info.name);
@@ -845,6 +853,20 @@ impl DataStore {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+/// Check if a variable's units attribute indicates radians.
+fn is_radians_unit(var: &netcdf::Variable) -> bool {
+    var.attribute_value("units")
+        .and_then(|v| v.ok())
+        .and_then(|v| match v {
+            netcdf::AttributeValue::Str(s) => Some(s),
+            _ => None,
+        })
+        .is_some_and(|u| {
+            let lower = u.to_ascii_lowercase();
+            lower == "radians" || lower == "radian" || lower == "rad"
+        })
+}
 
 /// Try to read a 1D coordinate variable by checking several candidate names.
 fn read_coord_var(file: &netcdf::File, candidates: &[&str]) -> Option<Vec<f64>> {

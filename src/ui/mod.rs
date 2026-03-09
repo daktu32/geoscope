@@ -204,7 +204,7 @@ impl Default for UiState {
             trajectory_enabled: false,
             trajectory_lon_var: None,
             trajectory_lat_var: None,
-            trajectory_trail_length: 50,
+            trajectory_trail_length: 500,
             suggestion: None,
             suggestion_dismissed: false,
         }
@@ -697,41 +697,35 @@ impl GeoScopeTabViewer<'_> {
                 let padded = egui::vec2(avail.x - pad_x * 2.0, avail.y - pad_y * 2.0);
                 let globe_rect = egui::Rect::from_center_size(central.center(), padded);
 
+                // Shared view/view_proj for all Globe overlays
+                let (view_for_overlays, view_proj_for_overlays) = crate::renderer::common::build_view_proj(
+                    self.globe_renderer.cam_lon,
+                    self.globe_renderer.cam_lat,
+                    self.globe_renderer.zoom,
+                    globe_rect,
+                );
                 if self.ui_state.vector_overlay_enabled {
-                    let (view, view_proj) = crate::renderer::common::build_view_proj(
-                        self.globe_renderer.cam_lon,
-                        self.globe_renderer.cam_lat,
-                        self.globe_renderer.zoom,
-                        globe_rect,
-                    );
                     self.vector_overlay.paint_on_globe(
                         child_ui.painter(),
                         globe_rect,
-                        &view,
-                        &view_proj,
+                        &view_for_overlays,
+                        &view_proj_for_overlays,
                     );
                 }
                 if self.ui_state.contour_enabled {
                     self.contour_overlay.paint_on_globe(
                         child_ui.painter(),
                         globe_rect,
-                        self.globe_renderer.cam_lon,
-                        self.globe_renderer.cam_lat,
-                        self.globe_renderer.zoom,
+                        &view_for_overlays,
+                        &view_proj_for_overlays,
                     );
                 }
                 if self.ui_state.trajectory_enabled {
-                    let (view, view_proj) = crate::renderer::common::build_view_proj(
-                        self.globe_renderer.cam_lon,
-                        self.globe_renderer.cam_lat,
-                        self.globe_renderer.zoom,
-                        globe_rect,
-                    );
                     self.trajectory_overlay.paint_on_globe(
                         child_ui.painter(),
                         globe_rect,
-                        &view,
-                        &view_proj,
+                        &view_for_overlays,
+                        &view_proj_for_overlays,
                     );
                 }
                 self.ui_state.hover_info = None;
@@ -1318,7 +1312,7 @@ impl GeoScopeTabViewer<'_> {
                                 });
 
                                 let mut trail = self.ui_state.trajectory_trail_length;
-                                if ui.add(egui::Slider::new(&mut trail, 10..=200).text("Trail")).changed() {
+                                if ui.add(egui::Slider::new(&mut trail, 10..=2000).logarithmic(true).text("Trail")).changed() {
                                     self.ui_state.trajectory_trail_length = trail;
                                 }
                             } else {
