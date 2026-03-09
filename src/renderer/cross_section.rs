@@ -12,6 +12,8 @@ pub struct CrossSectionRenderer {
     n_levels: usize,
     is_lat_axis: bool,
     level_values: Vec<f64>,
+    /// Current level index for playhead line
+    pub current_level: Option<usize>,
 }
 
 impl CrossSectionRenderer {
@@ -23,6 +25,7 @@ impl CrossSectionRenderer {
             n_levels: 0,
             is_lat_axis: false,
             level_values: Vec::new(),
+            current_level: None,
         }
     }
 
@@ -198,6 +201,19 @@ impl CrossSectionRenderer {
             font.clone(),
             label_color,
         );
+
+        // Level playhead line (top = highest level, bottom = level 0)
+        if let Some(lev_idx) = self.current_level {
+            if self.n_levels > 1 {
+                let frac = 1.0 - lev_idx as f32 / (self.n_levels - 1) as f32;
+                let y = plot_rect.min.y + frac * plot_rect.height();
+                let playhead_color = egui::Color32::from_rgba_premultiplied(255, 200, 60, 180);
+                painter.line_segment(
+                    [egui::pos2(plot_rect.left(), y), egui::pos2(plot_rect.right(), y)],
+                    egui::Stroke::new(1.5, playhead_color),
+                );
+            }
+        }
 
         // Border
         painter.rect_stroke(

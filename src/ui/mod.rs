@@ -158,6 +158,15 @@ pub struct UiState {
     // Visualization suggestion
     pub suggestion: Option<crate::data::inference::VisualizationSuggestion>,
     pub suggestion_dismissed: bool,
+    // Sidebar collapse state
+    pub left_panel_open: bool,
+    pub right_panel_open: bool,
+    // Context menu state
+    pub context_menu_pos: Option<egui::Pos2>,
+    pub context_menu_grid: Option<(usize, usize)>,  // (gx, gy)
+    pub context_menu_lonlat: Option<(f32, f32)>,     // (lon_deg, lat_deg)
+    /// Which sub-tab is active in the right panel: 0=Inspector, 1=Code
+    pub right_panel_tab: usize,
 }
 
 /// Range mode for colormap scaling.
@@ -212,6 +221,12 @@ impl Default for UiState {
             trajectory_trail_length: 500,
             suggestion: None,
             suggestion_dismissed: false,
+            left_panel_open: true,
+            right_panel_open: true,
+            right_panel_tab: 0,
+            context_menu_pos: None,
+            context_menu_grid: None,
+            context_menu_lonlat: None,
         }
     }
 }
@@ -270,20 +285,7 @@ impl TabViewer for GeoScopeTabViewer<'_> {
 }
 
 impl GeoScopeTabViewer<'_> {
-    fn data_browser_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Data").strong().size(14.0));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.button(egui::RichText::new("+").size(14.0)).clicked() {
-                    let paths = rfd::FileDialog::new()
-                        .add_filter("NetCDF", &["nc", "nc4", "netcdf"])
-                        .pick_files()
-                        .unwrap_or_default();
-                    self.open_file_request.extend(paths);
-                }
-            });
-        });
+    pub fn data_browser_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
 
         if self.data_store.files.is_empty() {
@@ -527,6 +529,13 @@ impl GeoScopeTabViewer<'_> {
             if i.key_pressed(egui::Key::T) {
                 self.ui_state.trajectory_enabled = !self.ui_state.trajectory_enabled;
             }
+            // [: toggle left sidebar, ]: toggle right sidebar
+            if i.key_pressed(egui::Key::OpenBracket) {
+                self.ui_state.left_panel_open = !self.ui_state.left_panel_open;
+            }
+            if i.key_pressed(egui::Key::CloseBracket) {
+                self.ui_state.right_panel_open = !self.ui_state.right_panel_open;
+            }
         });
 
         // Auto-play logic (runs before layout)
@@ -567,11 +576,11 @@ impl GeoScopeTabViewer<'_> {
                     for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum, ViewMode::CrossSection, ViewMode::Profile] {
                         let label = match mode {
                             ViewMode::Globe => "🌐 Globe",
-                            ViewMode::Map => "Map",
-                            ViewMode::Hovmoller => "Hovmoller",
-                            ViewMode::Spectrum => "Spectrum",
-                            ViewMode::CrossSection => "Section",
-                            ViewMode::Profile => "Profile",
+                            ViewMode::Map => "🗺 Map",
+                            ViewMode::Hovmoller => "📊 Hovmoller",
+                            ViewMode::Spectrum => "📈 Spectrum",
+                            ViewMode::CrossSection => "🔪 Section",
+                            ViewMode::Profile => "📍 Profile",
                         };
                         let is_active = self.ui_state.view_mode == mode;
                         let text = egui::RichText::new(label).size(12.0).color(
@@ -587,103 +596,10 @@ impl GeoScopeTabViewer<'_> {
                 });
             });
 
-        // Level slider (vertical, left side of viewport, vertically centered)
-        if let Some((level_name, level_size)) = self.active_level_dim() {
-            if level_size > 1 {
-                egui::SidePanel::left("viewport_level")
-                    .exact_width(48.0)
-                    .frame(egui::Frame::NONE.inner_margin(egui::Margin::symmetric(4, 0)))
-                    .show_inside(ui, |ui| {
-                        let max_lev = level_size - 1;
-                        let mut lev = self.ui_state.level_index.min(max_lev);
-
-                        // Coordinate value string
-                        let coord_str = self.data_store.active_file
-                            .and_then(|fi| self.data_store.files.get(fi))
-                            .and_then(|f| f.grid.lev.as_ref())
-                            .and_then(|lev_vals| lev_vals.get(lev))
-                            .map(|&v| {
-                                if v.abs() >= 100.0 || (v.abs() < 0.01 && v != 0.0) {
-                                    format!("{v:.1e}")
-                                } else {
-                                    format!("{v:.2}")
-                                }
-                            })
-                            .unwrap_or_else(|| format!("{lev}"));
-
-                        // "Level" header (centered manually)
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new("Level")
-                                    .size(10.0)
-                                    .strong()
-                                    .color(crate::app::TEXT_HEADING),
-                            );
-                            ui.label(
-                                egui::RichText::new(&level_name)
-                                    .monospace()
-                                    .size(9.0)
-                                    .color(crate::app::TEXT_CAPTION),
-                            );
-                        });
-
-                        ui.add_space(4.0);
-
-                        // Compute slider height from remaining space
-                        let remaining = ui.available_height();
-                        let bottom_reserve = 40.0;
-                        let slider_h = if self.ui_state.profile_split
-                            && self.ui_state.profile_point.is_some()
-                        {
-                            // Match profile plot area (~60% of remaining; profile has
-                            // its own toolbar, axis labels, margins that eat ~40%)
-                            (remaining * 0.6).max(60.0)
-                        } else {
-                            160.0_f32.min(remaining - bottom_reserve).max(40.0)
-                        };
-
-                        // Vertical slider — spacing().slider_width controls rail length
-                        let changed = ui.vertical_centered(|ui| {
-                            ui.spacing_mut().slider_width = slider_h;
-                            let slider = egui::Slider::new(&mut lev, 0..=max_lev)
-                                .vertical()
-                                .show_value(false);
-                            ui.add(slider).changed()
-                        }).inner;
-                        if changed {
-                            self.ui_state.level_index = lev;
-                            if let Some(fi) = self.data_store.active_file {
-                                if let Some(file) = self.data_store.files.get(fi) {
-                                    if let Some(vi) = file.selected_variable {
-                                        let t = self.ui_state.time_index;
-                                        if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
-                                            *self.data_generation += 1;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        ui.add_space(4.0);
-
-                        // Bottom labels
-                        ui.vertical_centered(|ui| {
-                            ui.label(
-                                egui::RichText::new(&coord_str)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(crate::app::TEXT_SECONDARY),
-                            );
-                            ui.label(
-                                egui::RichText::new(format!("{}/{}", lev, max_lev))
-                                    .monospace()
-                                    .size(9.0)
-                                    .color(crate::app::TEXT_CAPTION),
-                            );
-                        });
-                    });
-            }
-        }
+        // Level info saved for overlay rendering after the main viewport
+        let level_info = self.active_level_dim()
+            .filter(|(_, size)| *size > 1)
+            .map(|(name, size)| (name, size));
 
         // Time controls (video player style: full-width seekbar + control row)
         if let Some(time_len) = self.active_time_dim_len() {
@@ -812,7 +728,8 @@ impl GeoScopeTabViewer<'_> {
             && self.ui_state.profile_point.is_some()
             && matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map);
         let (central, profile_rect) = if show_split {
-            let split_x = full_central.left() + full_central.width() * 0.6;
+            const PHI: f32 = 1.618034;
+            let split_x = full_central.left() + full_central.width() * PHI / (1.0 + PHI);
             let left = egui::Rect::from_min_max(full_central.min, egui::pos2(split_x - 1.0, full_central.max.y));
             let right = egui::Rect::from_min_max(egui::pos2(split_x + 1.0, full_central.min.y), full_central.max);
             (left, Some(right))
@@ -821,6 +738,38 @@ impl GeoScopeTabViewer<'_> {
         };
 
         let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(central));
+
+        // Empty state: show drop placeholder when no files are loaded
+        if self.data_store.files.is_empty() {
+            let bg = central;
+            crate::renderer::globe::paint_viewport_background(child_ui.painter(), bg);
+            child_ui.allocate_ui_at_rect(central, |ui| {
+                ui.vertical_centered(|ui| {
+                    let half_h = central.height() / 2.0 - 60.0;
+                    ui.add_space(half_h.max(20.0));
+                    ui.label(
+                        egui::RichText::new("📂")
+                            .size(48.0)
+                            .color(crate::app::TEXT_CAPTION),
+                    );
+                    ui.add_space(12.0);
+                    ui.label(
+                        egui::RichText::new("Drop NetCDF file here")
+                            .size(20.0)
+                            .color(crate::app::TEXT_SECONDARY),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new("or use File → Open")
+                            .size(13.0)
+                            .color(crate::app::TEXT_CAPTION),
+                    );
+                });
+            });
+            ui.allocate_rect(full_central, egui::Sense::hover());
+            return;
+        }
+
         // Store Globe projection info for marker drawing later
         let mut globe_proj_info: Option<(egui::Rect, [[f32; 4]; 4], [[f32; 4]; 4])> = None;
         match self.ui_state.view_mode {
@@ -860,20 +809,18 @@ impl GeoScopeTabViewer<'_> {
                     );
                 }
                 globe_proj_info = Some((globe_rect, view_for_overlays, view_proj_for_overlays));
-                // Globe click → set profile point
+                // Globe click → set profile point (left) or context menu (right)
                 // Use the SAME view matrix (transposed) for inverse — guarantees exact match with marker
                 {
-                    let clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+                    let left_clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+                    let right_clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
                     let hover_pos = child_ui.input(|i| i.pointer.hover_pos());
-                    if clicked && !child_ui.input(|i| i.pointer.is_decidedly_dragging()) {
+                    let dragging = child_ui.input(|i| i.pointer.is_decidedly_dragging());
+                    if (left_clicked || right_clicked) && !dragging {
                         if let Some(pos) = hover_pos {
                             if globe_rect.contains(pos) {
-                                // Screen → NDC
                                 let ndx = (pos.x - globe_rect.center().x) / (globe_rect.width() * 0.5);
                                 let ndy = -(pos.y - globe_rect.center().y) / (globe_rect.height() * 0.5);
-
-                                // Inverse projection: undo aspect/zoom scaling
-                                // Use the SAME (sx, sy) as build_view_proj
                                 let aspect = globe_rect.width() / globe_rect.height().max(1.0);
                                 let zoom = self.globe_renderer.zoom;
                                 let (sx, sy) = if aspect > 1.0 {
@@ -883,33 +830,32 @@ impl GeoScopeTabViewer<'_> {
                                 };
                                 let vx = ndx / sx;
                                 let vy = ndy / sy;
-
                                 let r2 = vx * vx + vy * vy;
                                 if r2 <= 1.0 {
                                     let vz = (1.0 - r2).sqrt();
-
-                                    // Inverse view using the SAME view matrix (transpose of orthogonal = inverse)
                                     let v = &view_for_overlays;
-                                    // view^T * [vx, vy, vz]
                                     let wx = v[0][0] * vx + v[1][0] * vy + v[2][0] * vz;
                                     let wy = v[0][1] * vx + v[1][1] * vy + v[2][1] * vz;
                                     let wz = v[0][2] * vx + v[1][2] * vy + v[2][2] * vz;
-
-                                    // World → lon/lat (Globe mesh: y = sin(lat), x = cos(lat)*cos(lon), z = cos(lat)*sin(lon))
                                     let lat_rad = wy.asin();
                                     let lon_rad = wz.atan2(wx);
-
-                                    let lon_deg = lon_rad.to_degrees();
                                     let lat_deg = lat_rad.to_degrees();
-
-                                    let u = ((lon_deg + 180.0) / 360.0).rem_euclid(1.0);
+                                    let lon_deg = lon_rad.to_degrees();
+                                    let u = (lon_rad / (2.0 * std::f32::consts::PI)).rem_euclid(1.0);
                                     let v = (90.0 - lat_deg) / 180.0;
                                     if let Some(field) = self.data_store.active_field() {
                                         let gx = ((u * field.width as f32) as usize).min(field.width - 1);
                                         let gy = ((v * field.height as f32) as usize).min(field.height - 1);
-                                        self.ui_state.profile_point = Some((gx, gy));
-                                        self.ui_state.profile_split = true;
-                                        *self.data_generation += 1;
+                                        if left_clicked {
+                                            self.ui_state.profile_point = Some((gx, gy));
+                                            self.ui_state.profile_split = true;
+                                            *self.data_generation += 1;
+                                        } else {
+                                            // Right click → open context menu
+                                            self.ui_state.context_menu_pos = Some(pos);
+                                            self.ui_state.context_menu_grid = Some((gx, gy));
+                                            self.ui_state.context_menu_lonlat = Some((lon_deg.rem_euclid(360.0), lat_deg));
+                                        }
                                     }
                                 }
                             }
@@ -960,6 +906,7 @@ impl GeoScopeTabViewer<'_> {
                 if self.map_renderer.projection == MapProjection::Equirectangular {
                     let hover_pos = child_ui.input(|i| i.pointer.hover_pos());
                     let clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Primary));
+                    let right_clicked = child_ui.input(|i| i.pointer.button_clicked(egui::PointerButton::Secondary));
                     if let Some(pos) = hover_pos {
                         if central.contains(pos) {
                             // Screen → NDC (account for pan/zoom via inverse ortho)
@@ -991,11 +938,17 @@ impl GeoScopeTabViewer<'_> {
                                         lat_deg,
                                         value: val,
                                     });
-                                    // Click → set profile point
+                                    // Left click → set profile point
                                     if clicked && !child_ui.input(|i| i.pointer.is_decidedly_dragging()) {
                                         self.ui_state.profile_point = Some((gx, gy));
                                         self.ui_state.profile_split = true;
-                                        *self.data_generation += 1; // trigger profile reload
+                                        *self.data_generation += 1;
+                                    }
+                                    // Right click → context menu
+                                    if right_clicked && !child_ui.input(|i| i.pointer.is_decidedly_dragging()) {
+                                        self.ui_state.context_menu_pos = Some(pos);
+                                        self.ui_state.context_menu_grid = Some((gx, gy));
+                                        self.ui_state.context_menu_lonlat = Some((lon_deg.rem_euclid(360.0), lat_deg));
                                     }
                                 }
                             } else {
@@ -1015,7 +968,49 @@ impl GeoScopeTabViewer<'_> {
             ViewMode::Spectrum => self.spectrum_renderer.paint(&mut child_ui),
             ViewMode::CrossSection => self.cross_section_renderer.paint(&mut child_ui),
             ViewMode::Profile => {
-                self.profile_renderer.paint(&mut child_ui);
+                // Mode toolbar at top
+                child_ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    let vert_active = self.ui_state.profile_mode == ProfileMode::Vertical;
+                    let vert_text = egui::RichText::new("Vertical").size(11.0).color(
+                        if vert_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(vert_text).fill(
+                        if vert_active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT }
+                    ).corner_radius(3.0)).clicked() && !vert_active {
+                        self.ui_state.profile_mode = ProfileMode::Vertical;
+                        *self.data_generation += 1;
+                    }
+                    let ts_active = self.ui_state.profile_mode == ProfileMode::TimeSeries;
+                    let ts_text = egui::RichText::new("Time").size(11.0).color(
+                        if ts_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(ts_text).fill(
+                        if ts_active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT }
+                    ).corner_radius(3.0)).clicked() && !ts_active {
+                        self.ui_state.profile_mode = ProfileMode::TimeSeries;
+                        *self.data_generation += 1;
+                    }
+                    let hm_active = self.ui_state.profile_mode == ProfileMode::TimeLevelHeatmap;
+                    let hm_text = egui::RichText::new("T-Lev").size(11.0).color(
+                        if hm_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(hm_text).fill(
+                        if hm_active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT }
+                    ).corner_radius(3.0)).clicked() && !hm_active {
+                        self.ui_state.profile_mode = ProfileMode::TimeLevelHeatmap;
+                        *self.data_generation += 1;
+                    }
+                });
+                // Render profile/heatmap
+                match self.ui_state.profile_mode {
+                    ProfileMode::TimeLevelHeatmap if self.profile_renderer.has_heatmap() => {
+                        self.profile_renderer.paint_heatmap(&mut child_ui);
+                    }
+                    _ => {
+                        self.profile_renderer.paint(&mut child_ui);
+                    }
+                }
             }
         }
         // Hover info overlay (bottom-left of viewport)
@@ -1050,6 +1045,96 @@ impl GeoScopeTabViewer<'_> {
                 galley,
                 crate::app::TEXT_BODY,
             );
+        }
+
+        // Floating level slider overlay (left edge of viewport)
+        // Shown in Globe, Map, Profile, and CrossSection views
+        if let Some((level_name, level_size)) = level_info {
+            if matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map | ViewMode::Profile | ViewMode::CrossSection) {
+                let max_lev = level_size - 1;
+                let mut lev = self.ui_state.level_index.min(max_lev);
+
+                let coord_str = self.data_store.active_file
+                    .and_then(|fi| self.data_store.files.get(fi))
+                    .and_then(|f| f.grid.lev.as_ref())
+                    .and_then(|lev_vals| lev_vals.get(lev))
+                    .map(|&v| {
+                        if v.abs() >= 100.0 || (v.abs() < 0.01 && v != 0.0) {
+                            format!("{v:.1e}")
+                        } else {
+                            format!("{v:.2}")
+                        }
+                    })
+                    .unwrap_or_else(|| format!("{lev}"));
+
+                let panel_w = 44.0;
+                let margin_x = 10.0;
+                let slider_h = (central.height() * 0.5).clamp(80.0, 300.0);
+
+                let area_pos = egui::pos2(central.left() + margin_x, central.center().y - slider_h / 2.0 - 20.0);
+
+                egui::Area::new(egui::Id::new("level_overlay"))
+                    .fixed_pos(area_pos)
+                    .order(egui::Order::Foreground)
+                    .interactable(true)
+                    .show(ui.ctx(), |ui| {
+                        egui::Frame::new()
+                            .fill(egui::Color32::from_rgba_unmultiplied(15, 15, 23, 200))
+                            .corner_radius(6.0)
+                            .inner_margin(egui::Margin::symmetric(6, 8))
+                            .show(ui, |ui| {
+                                ui.set_width(panel_w);
+                                // Header
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(&level_name)
+                                            .size(10.0)
+                                            .color(crate::app::TEXT_CAPTION),
+                                    );
+                                });
+                                ui.add_space(4.0);
+                                // Slider
+                                ui.vertical_centered(|ui| {
+                                    ui.spacing_mut().slider_width = slider_h;
+                                    let slider = egui::Slider::new(&mut lev, 0..=max_lev)
+                                        .vertical()
+                                        .show_value(false);
+                                    ui.add(slider);
+                                });
+                                ui.add_space(4.0);
+                                // Labels
+                                ui.vertical_centered(|ui| {
+                                    ui.label(
+                                        egui::RichText::new(&coord_str)
+                                            .monospace()
+                                            .size(10.0)
+                                            .color(crate::app::TEXT_SECONDARY),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(format!("{}/{}", lev, max_lev))
+                                            .monospace()
+                                            .size(9.0)
+                                            .color(crate::app::TEXT_CAPTION),
+                                    );
+                                });
+                            });
+                    });
+
+                // Apply level change
+                if lev != self.ui_state.level_index.min(max_lev) {
+                    self.ui_state.level_index = lev;
+                    if let Some(fi) = self.data_store.active_file {
+                        if let Some(file) = self.data_store.files.get(fi) {
+                            if let Some(vi) = file.selected_variable {
+                                let t = self.ui_state.time_index;
+                                if self.data_store.load_field_at(fi, vi, t, lev).is_ok() {
+                                    *self.data_generation += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Floating zoom controls (bottom-right corner, Globe/Map only)
@@ -1139,15 +1224,14 @@ impl GeoScopeTabViewer<'_> {
 
                     if self.ui_state.view_mode == ViewMode::Globe {
                         if let Some((globe_rect, view, view_proj)) = globe_proj_info {
-                            // UV → lon/lat → 3D sphere (same as trajectory overlay)
-                            let lon_deg = u * 360.0 - 180.0;
-                            let lat_deg = 90.0 - v * 180.0;
-                            let theta = lon_deg.to_radians();
-                            let lat_rad = lat_deg.to_radians();
-                            let cos_lat = lat_rad.cos();
-                            let x = cos_lat * theta.cos();
-                            let y = lat_rad.sin();
-                            let z = cos_lat * theta.sin();
+                            // UV → 3D sphere (match globe mesh: theta = 2*PI*u, phi = PI*v)
+                            let theta = 2.0 * std::f32::consts::PI * u;
+                            let phi = std::f32::consts::PI * v;
+                            let lat_rad = std::f32::consts::FRAC_PI_2 - phi; // lat = 90° - phi
+                            let sin_phi = phi.sin();
+                            let x = sin_phi * theta.cos();
+                            let y = phi.cos();
+                            let z = sin_phi * theta.sin();
                             // Back-face culling via view matrix z-row
                             let vz = view[2][0]*x + view[2][1]*y + view[2][2]*z;
                             if vz >= 0.0 {
@@ -1265,6 +1349,86 @@ impl GeoScopeTabViewer<'_> {
             }
         }
 
+        // Context menu (right-click on Globe/Map)
+        if let (Some(menu_pos), Some((gx, gy)), Some((lon, lat))) = (
+            self.ui_state.context_menu_pos,
+            self.ui_state.context_menu_grid,
+            self.ui_state.context_menu_lonlat,
+        ) {
+            let mut close_menu = false;
+            let lon_label = if lon >= 180.0 { format!("{:.1}°W", 360.0 - lon) } else { format!("{:.1}°E", lon) };
+            let lat_label = if lat >= 0.0 { format!("{:.1}°N", lat) } else { format!("{:.1}°S", -lat) };
+
+            egui::Area::new(egui::Id::new("viewport_context_menu"))
+                .fixed_pos(menu_pos)
+                .order(egui::Order::Foreground)
+                .interactable(true)
+                .show(ui.ctx(), |ui| {
+                    egui::Frame::new()
+                        .fill(crate::app::BG_PANEL)
+                        .corner_radius(6.0)
+                        .inner_margin(egui::Margin::symmetric(8, 6))
+                        .stroke(egui::Stroke::new(1.0, crate::app::DIVIDER))
+                        .show(ui, |ui| {
+                            // Header: coordinates
+                            ui.label(egui::RichText::new(format!("{}, {}", lon_label, lat_label))
+                                .size(10.0).color(crate::app::TEXT_CAPTION));
+                            ui.separator();
+
+                            // Profile at this point
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("📍 Profile here").size(11.0).color(crate::app::TEXT_BODY)
+                            ).frame(false)).clicked() {
+                                self.ui_state.profile_point = Some((gx, gy));
+                                self.ui_state.profile_split = true;
+                                *self.data_generation += 1;
+                                close_menu = true;
+                            }
+
+                            // Switch to Profile tab
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("📊 Open Profile tab").size(11.0).color(crate::app::TEXT_BODY)
+                            ).frame(false)).clicked() {
+                                self.ui_state.profile_point = Some((gx, gy));
+                                self.ui_state.view_mode = ViewMode::Profile;
+                                *self.data_generation += 1;
+                                close_menu = true;
+                            }
+
+                            // Export PNG
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("💾 Export PNG").size(11.0).color(crate::app::TEXT_BODY)
+                            ).frame(false)).clicked() {
+                                self.ui_state.export_dialog_open = true;
+                                close_menu = true;
+                            }
+
+                            // Center view here (Globe only)
+                            if self.ui_state.view_mode == ViewMode::Globe {
+                                if ui.add(egui::Button::new(
+                                    egui::RichText::new("🌐 Center here").size(11.0).color(crate::app::TEXT_BODY)
+                                ).frame(false)).clicked() {
+                                    self.globe_renderer.cam_lon = lon.to_radians();
+                                    self.globe_renderer.cam_lat = lat.to_radians();
+                                    close_menu = true;
+                                }
+                            }
+                        });
+                });
+
+            // Close menu on click elsewhere or Escape
+            let clicked_elsewhere = ui.input(|i|
+                i.pointer.button_clicked(egui::PointerButton::Primary)
+                || i.pointer.button_clicked(egui::PointerButton::Secondary)
+            );
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            if close_menu || clicked_elsewhere || esc {
+                self.ui_state.context_menu_pos = None;
+                self.ui_state.context_menu_grid = None;
+                self.ui_state.context_menu_lonlat = None;
+            }
+        }
+
         ui.allocate_rect(full_central, egui::Sense::hover());
     }
 
@@ -1302,10 +1466,8 @@ impl GeoScopeTabViewer<'_> {
         rect
     }
 
-    fn inspector_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(6.0);
-        ui.label(egui::RichText::new("Inspector").strong().size(13.0));
-        ui.add_space(6.0);
+    pub fn inspector_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
 
         let mut inspector_load_request: Option<(usize, usize)> = None;
 
@@ -1315,9 +1477,9 @@ impl GeoScopeTabViewer<'_> {
                     let var = &file.variables[var_idx];
 
                     // --- Variable ---
-                    Self::section_header(ui, "Variable");
-                    ui.add_space(2.0);
-                    {
+                    egui::CollapsingHeader::new(egui::RichText::new("Variable").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        .default_open(true)
+                        .show(ui, |ui| {
                         let var_names: Vec<String> = file.variables.iter().enumerate()
                             .filter(|(_, v)| !(v.dimensions.len() <= 1 && v.dimensions.first().is_some_and(|(d, _)| d == &v.name)))
                             .map(|(_, v)| v.name.clone())
@@ -1341,400 +1503,386 @@ impl GeoScopeTabViewer<'_> {
                                 inspector_load_request = Some((file_idx, new_var_idx));
                             }
                         }
-                    }
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
+                    });
 
                     // --- Projection (Map view only) ---
                     if self.ui_state.view_mode == ViewMode::Map {
-                        Self::section_header(ui, "Projection");
-                        ui.add_space(3.0);
-                        egui::ComboBox::from_id_salt("projection_combo_main")
-                            .selected_text(match self.ui_state.map_projection {
-                                MapProjection::Equirectangular => "Equirectangular",
-                                MapProjection::Mollweide => "Mollweide",
-                                MapProjection::PolarNorth => "Polar (North)",
-                                MapProjection::PolarSouth => "Polar (South)",
-                            })
-                            .width(ui.available_width() - 8.0)
-                            .show_ui(ui, |ui| {
-                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Equirectangular, "Equirectangular");
-                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Mollweide, "Mollweide");
-                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarNorth, "Polar (North)");
-                                ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarSouth, "Polar (South)");
+                        egui::CollapsingHeader::new(egui::RichText::new("Projection").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                egui::ComboBox::from_id_salt("projection_combo_main")
+                                    .selected_text(match self.ui_state.map_projection {
+                                        MapProjection::Equirectangular => "Equirectangular",
+                                        MapProjection::Mollweide => "Mollweide",
+                                        MapProjection::PolarNorth => "Polar (North)",
+                                        MapProjection::PolarSouth => "Polar (South)",
+                                    })
+                                    .width(ui.available_width() - 8.0)
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Equirectangular, "Equirectangular");
+                                        ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::Mollweide, "Mollweide");
+                                        ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarNorth, "Polar (North)");
+                                        ui.selectable_value(&mut self.ui_state.map_projection, MapProjection::PolarSouth, "Polar (South)");
+                                    });
                             });
                     }
 
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
-
                     // --- Colormap ---
-                    Self::section_header(ui, "Colormap");
-                    ui.add_space(3.0);
-                    egui::ComboBox::from_id_salt("colormap_combo")
-                        .selected_text(self.ui_state.colormap.label())
-                        .width(ui.available_width() - 8.0)
-                        .show_ui(ui, |ui| {
-                            ui.label(egui::RichText::new("Sequential").size(10.0).color(crate::app::TEXT_CAPTION));
-                            for cm in Colormap::SEQUENTIAL {
-                                ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
-                            }
-                            ui.separator();
-                            ui.label(egui::RichText::new("Diverging").size(10.0).color(crate::app::TEXT_CAPTION));
-                            for cm in Colormap::DIVERGING {
-                                ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
+                    egui::CollapsingHeader::new(egui::RichText::new("Colormap").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            egui::ComboBox::from_id_salt("colormap_combo")
+                                .selected_text(self.ui_state.colormap.label())
+                                .width(ui.available_width() - 8.0)
+                                .show_ui(ui, |ui| {
+                                    ui.label(egui::RichText::new("Sequential").size(10.0).color(crate::app::TEXT_CAPTION));
+                                    for cm in Colormap::SEQUENTIAL {
+                                        ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
+                                    }
+                                    ui.separator();
+                                    ui.label(egui::RichText::new("Diverging").size(10.0).color(crate::app::TEXT_CAPTION));
+                                    for cm in Colormap::DIVERGING {
+                                        ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
+                                    }
+                                });
+
+                            // Gradient preview
+                            ui.add_space(4.0);
+                            let bar_w = ui.available_width() - 8.0;
+                            let lut = &self.lut_cache[&self.ui_state.colormap];
+                            let bar_rect = Self::draw_colorbar(ui, lut, bar_w, 20.0);
+                            // Description label below colorbar
+                            ui.label(
+                                egui::RichText::new(format!("{} ({})", self.ui_state.colormap.label(), self.ui_state.colormap.description()))
+                                    .size(10.0)
+                                    .color(crate::app::TEXT_CAPTION),
+                            );
+
+                            // Min/max labels below description
+                            if let Some(ref field) = file.field_data {
+                                let (dmin, dmax) = match self.ui_state.range_mode {
+                                    RangeMode::Slice => (field.min, field.max),
+                                    RangeMode::Global => self.ui_state.global_range.unwrap_or((field.min, field.max)),
+                                    RangeMode::Manual => (self.ui_state.manual_min, self.ui_state.manual_max),
+                                };
+                                let painter = ui.painter();
+                                let label_color = crate::app::TEXT_SECONDARY;
+                                let font = egui::FontId::monospace(10.0);
+                                painter.text(
+                                    egui::pos2(bar_rect.left(), bar_rect.bottom() + 1.0),
+                                    egui::Align2::LEFT_TOP, format!("{:.3e}", dmin), font.clone(), label_color,
+                                );
+                                painter.text(
+                                    egui::pos2(bar_rect.right(), bar_rect.bottom() + 1.0),
+                                    egui::Align2::RIGHT_TOP, format!("{:.3e}", dmax), font, label_color,
+                                );
+                                ui.add_space(12.0);
                             }
                         });
 
-                    // Gradient preview
-                    ui.add_space(4.0);
-                    let bar_w = ui.available_width() - 8.0;
-                    let lut = &self.lut_cache[&self.ui_state.colormap];
-                    let bar_rect = Self::draw_colorbar(ui, lut, bar_w, 20.0);
-                    // Description label below colorbar
-                    ui.label(
-                        egui::RichText::new(format!("{} ({})", self.ui_state.colormap.label(), self.ui_state.colormap.description()))
-                            .size(10.0)
-                            .color(crate::app::TEXT_CAPTION),
-                    );
-
-                    // Min/max labels below description
-                    if let Some(ref field) = file.field_data {
-                        let (dmin, dmax) = match self.ui_state.range_mode {
-                            RangeMode::Slice => (field.min, field.max),
-                            RangeMode::Global => self.ui_state.global_range.unwrap_or((field.min, field.max)),
-                            RangeMode::Manual => (self.ui_state.manual_min, self.ui_state.manual_max),
-                        };
-                        let painter = ui.painter();
-                        let label_color = crate::app::TEXT_SECONDARY;
-                        let font = egui::FontId::monospace(10.0);
-                        painter.text(
-                            egui::pos2(bar_rect.left(), bar_rect.bottom() + 1.0),
-                            egui::Align2::LEFT_TOP, format!("{:.3e}", dmin), font.clone(), label_color,
-                        );
-                        painter.text(
-                            egui::pos2(bar_rect.right(), bar_rect.bottom() + 1.0),
-                            egui::Align2::RIGHT_TOP, format!("{:.3e}", dmax), font, label_color,
-                        );
-                        ui.add_space(12.0);
-                    }
-
-                    // Display mode toggle
-                    ui.add_space(2.0);
-                    ui.horizontal(|ui| {
-                        Self::dim_label(ui, "Display");
-                        for (label, is_smooth) in [("Grid", false), ("Smooth", true)] {
-                            let active = self.ui_state.interpolated == is_smooth;
-                            let text = egui::RichText::new(label).size(10.0).color(
-                                if active { crate::app::PRIMARY } else { crate::app::TEXT_SECONDARY }
-                            );
-                            let btn = egui::Button::new(text)
-                                .fill(if active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT })
-                                .corner_radius(3.0);
-                            if ui.add(btn).clicked() {
-                                self.ui_state.interpolated = is_smooth;
-                                *self.data_generation += 1;
-                            }
-                        }
-                    });
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
+                    // --- Display ---
+                    egui::CollapsingHeader::new(egui::RichText::new("Display").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                for (label, is_smooth) in [("Grid", false), ("Smooth", true)] {
+                                    let active = self.ui_state.interpolated == is_smooth;
+                                    let text = egui::RichText::new(label).size(10.0).color(
+                                        if active { crate::app::PRIMARY } else { crate::app::TEXT_SECONDARY }
+                                    );
+                                    let btn = egui::Button::new(text)
+                                        .fill(if active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT })
+                                        .corner_radius(3.0);
+                                    if ui.add(btn).clicked() {
+                                        self.ui_state.interpolated = is_smooth;
+                                        *self.data_generation += 1;
+                                    }
+                                }
+                            });
+                        });
 
                     // --- Range ---
                     if let Some(ref field) = file.field_data {
-                        Self::section_header(ui, "Range");
-                        ui.add_space(3.0);
-
-                        // Min/Max DragValues with "to" separator (always visible)
-                        let (display_min, display_max) = match self.ui_state.range_mode {
-                            RangeMode::Slice => (field.min, field.max),
-                            RangeMode::Global => self.ui_state.global_range.unwrap_or((field.min, field.max)),
-                            RangeMode::Manual => (self.ui_state.manual_min, self.ui_state.manual_max),
-                        };
-                        ui.horizontal(|ui| {
-                            let w = (ui.available_width() - 30.0) / 2.0;
-                            if self.ui_state.range_mode == RangeMode::Manual {
-                                if ui.add_sized([w, 20.0], egui::DragValue::new(&mut self.ui_state.manual_min).speed(0.001).max_decimals(4)).changed() {
-                                    *self.data_generation += 1;
-                                }
-                                ui.label(egui::RichText::new("to").size(10.0).color(crate::app::TEXT_CAPTION));
-                                if ui.add_sized([w, 20.0], egui::DragValue::new(&mut self.ui_state.manual_max).speed(0.001).max_decimals(4)).changed() {
-                                    *self.data_generation += 1;
-                                }
-                            } else {
-                                ui.add_sized([w, 20.0], egui::Label::new(
-                                    egui::RichText::new(format!("{:.3e}", display_min)).monospace().size(11.0)
-                                ));
-                                ui.label(egui::RichText::new("to").size(10.0).color(crate::app::TEXT_CAPTION));
-                                ui.add_sized([w, 20.0], egui::Label::new(
-                                    egui::RichText::new(format!("{:.3e}", display_max)).monospace().size(11.0)
-                                ));
-                            }
-                        });
-
-                        // Scale mode buttons
-                        ui.add_space(2.0);
-                        ui.horizontal(|ui| {
-                            for (mode, label) in [(RangeMode::Slice, "Slice"), (RangeMode::Global, "Global"), (RangeMode::Manual, "Manual")] {
-                                let active = self.ui_state.range_mode == mode;
-                                let text = egui::RichText::new(label).size(10.0).color(
-                                    if active { crate::app::PRIMARY } else { crate::app::TEXT_SECONDARY }
-                                );
-                                let btn = egui::Button::new(text)
-                                    .fill(if active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT })
-                                    .corner_radius(3.0);
-                                if ui.add(btn).clicked() {
-                                    self.ui_state.range_mode = mode;
-                                    if mode == RangeMode::Manual {
-                                        self.ui_state.manual_min = display_min;
-                                        self.ui_state.manual_max = display_max;
+                        egui::CollapsingHeader::new(egui::RichText::new("Range").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                // Min/Max DragValues with "to" separator (always visible)
+                                let (display_min, display_max) = match self.ui_state.range_mode {
+                                    RangeMode::Slice => (field.min, field.max),
+                                    RangeMode::Global => self.ui_state.global_range.unwrap_or((field.min, field.max)),
+                                    RangeMode::Manual => (self.ui_state.manual_min, self.ui_state.manual_max),
+                                };
+                                ui.horizontal(|ui| {
+                                    let w = (ui.available_width() - 30.0) / 2.0;
+                                    if self.ui_state.range_mode == RangeMode::Manual {
+                                        if ui.add_sized([w, 20.0], egui::DragValue::new(&mut self.ui_state.manual_min).speed(0.001).max_decimals(4)).changed() {
+                                            *self.data_generation += 1;
+                                        }
+                                        ui.label(egui::RichText::new("to").size(10.0).color(crate::app::TEXT_CAPTION));
+                                        if ui.add_sized([w, 20.0], egui::DragValue::new(&mut self.ui_state.manual_max).speed(0.001).max_decimals(4)).changed() {
+                                            *self.data_generation += 1;
+                                        }
+                                    } else {
+                                        ui.add_sized([w, 20.0], egui::Label::new(
+                                            egui::RichText::new(format!("{:.3e}", display_min)).monospace().size(11.0)
+                                        ));
+                                        ui.label(egui::RichText::new("to").size(10.0).color(crate::app::TEXT_CAPTION));
+                                        ui.add_sized([w, 20.0], egui::Label::new(
+                                            egui::RichText::new(format!("{:.3e}", display_max)).monospace().size(11.0)
+                                        ));
                                     }
-                                    *self.data_generation += 1;
-                                }
-                            }
-                        });
+                                });
 
-                        // Symmetric (0-centered) checkbox
-                        if Colormap::DIVERGING.contains(&self.ui_state.colormap) {
-                            ui.add_space(2.0);
-                            let mut symmetric = self.ui_state.range_mode == RangeMode::Manual
-                                && (self.ui_state.manual_min + self.ui_state.manual_max).abs() < 1e-10;
-                            if ui.checkbox(&mut symmetric, egui::RichText::new("Symmetric (0-centered)").size(10.0)).changed() {
-                                if symmetric {
-                                    let abs_max = display_min.abs().max(display_max.abs());
-                                    self.ui_state.range_mode = RangeMode::Manual;
-                                    self.ui_state.manual_min = -abs_max;
-                                    self.ui_state.manual_max = abs_max;
-                                    *self.data_generation += 1;
+                                // Scale mode buttons
+                                ui.add_space(2.0);
+                                ui.horizontal(|ui| {
+                                    for (mode, label) in [(RangeMode::Slice, "Slice"), (RangeMode::Global, "Global"), (RangeMode::Manual, "Manual")] {
+                                        let active = self.ui_state.range_mode == mode;
+                                        let text = egui::RichText::new(label).size(10.0).color(
+                                            if active { crate::app::PRIMARY } else { crate::app::TEXT_SECONDARY }
+                                        );
+                                        let btn = egui::Button::new(text)
+                                            .fill(if active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT })
+                                            .corner_radius(3.0);
+                                        if ui.add(btn).clicked() {
+                                            self.ui_state.range_mode = mode;
+                                            if mode == RangeMode::Manual {
+                                                self.ui_state.manual_min = display_min;
+                                                self.ui_state.manual_max = display_max;
+                                            }
+                                            *self.data_generation += 1;
+                                        }
+                                    }
+                                });
+
+                                // Symmetric (0-centered) checkbox
+                                if Colormap::DIVERGING.contains(&self.ui_state.colormap) {
+                                    ui.add_space(2.0);
+                                    let mut symmetric = self.ui_state.range_mode == RangeMode::Manual
+                                        && (self.ui_state.manual_min + self.ui_state.manual_max).abs() < 1e-10;
+                                    if ui.checkbox(&mut symmetric, egui::RichText::new("Symmetric (0-centered)").size(10.0)).changed() {
+                                        if symmetric {
+                                            let abs_max = display_min.abs().max(display_max.abs());
+                                            self.ui_state.range_mode = RangeMode::Manual;
+                                            self.ui_state.manual_min = -abs_max;
+                                            self.ui_state.manual_max = abs_max;
+                                            *self.data_generation += 1;
+                                        }
+                                    }
                                 }
-                            }
-                        }
+                            });
                     }
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
 
                     // --- View-specific settings ---
 
                     // Cross-section (CrossSection view only)
                     if self.ui_state.view_mode == ViewMode::CrossSection {
-                        Self::section_header(ui, "Cross Section");
-                        ui.add_space(3.0);
-                        ui.horizontal(|ui| {
-                            Self::dim_label(ui, "Axis");
-                            if ui.selectable_label(
-                                self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Latitude,
-                                egui::RichText::new("Fix Lat").size(10.0),
-                            ).clicked() {
-                                self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Latitude;
-                                *self.data_generation += 1;
-                            }
-                            if ui.selectable_label(
-                                self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Longitude,
-                                egui::RichText::new("Fix Lon").size(10.0),
-                            ).clicked() {
-                                self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Longitude;
-                                *self.data_generation += 1;
-                            }
-                        });
+                        egui::CollapsingHeader::new(egui::RichText::new("Cross Section").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(true)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    Self::dim_label(ui, "Axis");
+                                    if ui.selectable_label(
+                                        self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Latitude,
+                                        egui::RichText::new("Fix Lat").size(10.0),
+                                    ).clicked() {
+                                        self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Latitude;
+                                        *self.data_generation += 1;
+                                    }
+                                    if ui.selectable_label(
+                                        self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Longitude,
+                                        egui::RichText::new("Fix Lon").size(10.0),
+                                    ).clicked() {
+                                        self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Longitude;
+                                        *self.data_generation += 1;
+                                    }
+                                });
 
-                        let max_idx = if let Some(ref field) = file.field_data {
-                            match self.ui_state.cross_section_axis {
-                                crate::data::CrossSectionAxis::Latitude => field.height.saturating_sub(1),
-                                crate::data::CrossSectionAxis::Longitude => field.width.saturating_sub(1),
-                            }
-                        } else { 0 };
+                                let max_idx = if let Some(ref field) = file.field_data {
+                                    match self.ui_state.cross_section_axis {
+                                        crate::data::CrossSectionAxis::Latitude => field.height.saturating_sub(1),
+                                        crate::data::CrossSectionAxis::Longitude => field.width.saturating_sub(1),
+                                    }
+                                } else { 0 };
 
-                        if max_idx > 0 {
-                            let mut idx = self.ui_state.cross_section_idx.min(max_idx);
-                            // Show coordinate value next to slider
-                            let coord_label = match self.ui_state.cross_section_axis {
-                                crate::data::CrossSectionAxis::Latitude => {
-                                    // Fix Lat: show latitude value
-                                    file.grid.lat.as_ref()
-                                        .and_then(|lat| lat.get(idx))
-                                        .map(|&v| format!("{v:.1}°"))
-                                        .unwrap_or_default()
+                                if max_idx > 0 {
+                                    let mut idx = self.ui_state.cross_section_idx.min(max_idx);
+                                    // Show coordinate value next to slider
+                                    let coord_label = match self.ui_state.cross_section_axis {
+                                        crate::data::CrossSectionAxis::Latitude => {
+                                            // Fix Lat: show latitude value
+                                            file.grid.lat.as_ref()
+                                                .and_then(|lat| lat.get(idx))
+                                                .map(|&v| format!("{v:.1}°"))
+                                                .unwrap_or_default()
+                                        }
+                                        crate::data::CrossSectionAxis::Longitude => {
+                                            // Fix Lon: show longitude value
+                                            file.grid.lon.as_ref()
+                                                .and_then(|lon| lon.get(idx))
+                                                .map(|&v| format!("{v:.1}°"))
+                                                .unwrap_or_default()
+                                        }
+                                    };
+                                    let slider_text = if coord_label.is_empty() {
+                                        "Index".to_string()
+                                    } else {
+                                        coord_label
+                                    };
+                                    if ui.add(egui::Slider::new(&mut idx, 0..=max_idx).text(slider_text)).changed() {
+                                        self.ui_state.cross_section_idx = idx;
+                                        *self.data_generation += 1;
+                                    }
                                 }
-                                crate::data::CrossSectionAxis::Longitude => {
-                                    // Fix Lon: show longitude value
-                                    file.grid.lon.as_ref()
-                                        .and_then(|lon| lon.get(idx))
-                                        .map(|&v| format!("{v:.1}°"))
-                                        .unwrap_or_default()
-                                }
-                            };
-                            let slider_text = if coord_label.is_empty() {
-                                "Index".to_string()
-                            } else {
-                                coord_label
-                            };
-                            if ui.add(egui::Slider::new(&mut idx, 0..=max_idx).text(slider_text)).changed() {
-                                self.ui_state.cross_section_idx = idx;
-                                *self.data_generation += 1;
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
+                            });
                     }
 
                     // Vector overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        Self::section_header(ui, "Vector Overlay");
-                        ui.add_space(3.0);
-                        ui.checkbox(&mut self.ui_state.vector_overlay_enabled, egui::RichText::new("Enabled").size(11.0));
+                        egui::CollapsingHeader::new(egui::RichText::new("Vector Overlay").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut self.ui_state.vector_overlay_enabled, egui::RichText::new("Enabled").size(11.0));
 
-                        if self.ui_state.vector_overlay_enabled {
-                            if self.ui_state.vector_u_var.is_none() {
-                                if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
-                                    self.ui_state.vector_u_var = Some(u_idx);
-                                    self.ui_state.vector_v_var = Some(v_idx);
+                                if self.ui_state.vector_overlay_enabled {
+                                    if self.ui_state.vector_u_var.is_none() {
+                                        if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
+                                            self.ui_state.vector_u_var = Some(u_idx);
+                                            self.ui_state.vector_v_var = Some(v_idx);
+                                        }
+                                    }
+
+                                    let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("u:").size(10.0));
+                                        let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
+                                        let mut u_idx = self.ui_state.vector_u_var.unwrap_or(0);
+                                        egui::ComboBox::from_id_salt("vector_u_combo")
+                                            .selected_text(var_names.get(u_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                            .width(combo_w)
+                                            .show_ui(ui, |ui| {
+                                                for (i, name) in var_names.iter().enumerate() {
+                                                    ui.selectable_value(&mut u_idx, i, name);
+                                                }
+                                            });
+                                        self.ui_state.vector_u_var = Some(u_idx);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        ui.label(egui::RichText::new("v:").size(10.0));
+                                        let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
+                                        let mut v_idx = self.ui_state.vector_v_var.unwrap_or(0);
+                                        egui::ComboBox::from_id_salt("vector_v_combo")
+                                            .selected_text(var_names.get(v_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                            .width(combo_w)
+                                            .show_ui(ui, |ui| {
+                                                for (i, name) in var_names.iter().enumerate() {
+                                                    ui.selectable_value(&mut v_idx, i, name);
+                                                }
+                                            });
+                                        self.ui_state.vector_v_var = Some(v_idx);
+                                    });
+
+                                    let mut density = self.ui_state.vector_density;
+                                    if ui.add(egui::Slider::new(&mut density, 2..=20).text("Density")).changed() {
+                                        self.ui_state.vector_density = density;
+                                    }
+                                    let mut scale = self.ui_state.vector_scale;
+                                    if ui.add(egui::Slider::new(&mut scale, 0.1..=5.0).text("Scale")).changed() {
+                                        self.ui_state.vector_scale = scale;
+                                    }
                                 }
-                            }
-
-                            let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("u:").size(10.0));
-                                let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
-                                let mut u_idx = self.ui_state.vector_u_var.unwrap_or(0);
-                                egui::ComboBox::from_id_salt("vector_u_combo")
-                                    .selected_text(var_names.get(u_idx).map(|s| s.as_str()).unwrap_or("?"))
-                                    .width(combo_w)
-                                    .show_ui(ui, |ui| {
-                                        for (i, name) in var_names.iter().enumerate() {
-                                            ui.selectable_value(&mut u_idx, i, name);
-                                        }
-                                    });
-                                self.ui_state.vector_u_var = Some(u_idx);
                             });
-                            ui.horizontal(|ui| {
-                                ui.label(egui::RichText::new("v:").size(10.0));
-                                let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
-                                let mut v_idx = self.ui_state.vector_v_var.unwrap_or(0);
-                                egui::ComboBox::from_id_salt("vector_v_combo")
-                                    .selected_text(var_names.get(v_idx).map(|s| s.as_str()).unwrap_or("?"))
-                                    .width(combo_w)
-                                    .show_ui(ui, |ui| {
-                                        for (i, name) in var_names.iter().enumerate() {
-                                            ui.selectable_value(&mut v_idx, i, name);
-                                        }
-                                    });
-                                self.ui_state.vector_v_var = Some(v_idx);
-                            });
-
-                            let mut density = self.ui_state.vector_density;
-                            if ui.add(egui::Slider::new(&mut density, 2..=20).text("Density")).changed() {
-                                self.ui_state.vector_density = density;
-                            }
-                            let mut scale = self.ui_state.vector_scale;
-                            if ui.add(egui::Slider::new(&mut scale, 0.1..=5.0).text("Scale")).changed() {
-                                self.ui_state.vector_scale = scale;
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
                     }
 
                     // Contour overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        Self::section_header(ui, "Contour Lines");
-                        ui.add_space(3.0);
-                        ui.checkbox(&mut self.ui_state.contour_enabled, egui::RichText::new("Enabled").size(11.0));
-                        if self.ui_state.contour_enabled {
-                            let mut levels = self.ui_state.contour_levels;
-                            if ui.add(egui::Slider::new(&mut levels, 3..=30).text("Levels")).changed() {
-                                self.ui_state.contour_levels = levels;
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
+                        egui::CollapsingHeader::new(egui::RichText::new("Contour Lines").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut self.ui_state.contour_enabled, egui::RichText::new("Enabled").size(11.0));
+                                if self.ui_state.contour_enabled {
+                                    let mut levels = self.ui_state.contour_levels;
+                                    if ui.add(egui::Slider::new(&mut levels, 3..=30).text("Levels")).changed() {
+                                        self.ui_state.contour_levels = levels;
+                                    }
+                                }
+                            });
                     }
 
                     // Streamline overlay (Map view only for now)
                     if self.ui_state.view_mode == ViewMode::Map {
-                        Self::section_header(ui, "Streamlines");
-                        ui.add_space(3.0);
-                        ui.checkbox(&mut self.ui_state.streamline_enabled, egui::RichText::new("Enabled").size(11.0));
-                        if self.ui_state.streamline_enabled {
-                            if self.ui_state.vector_u_var.is_none() {
-                                if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
-                                    self.ui_state.vector_u_var = Some(u_idx);
-                                    self.ui_state.vector_v_var = Some(v_idx);
+                        egui::CollapsingHeader::new(egui::RichText::new("Streamlines").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut self.ui_state.streamline_enabled, egui::RichText::new("Enabled").size(11.0));
+                                if self.ui_state.streamline_enabled {
+                                    if self.ui_state.vector_u_var.is_none() {
+                                        if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
+                                            self.ui_state.vector_u_var = Some(u_idx);
+                                            self.ui_state.vector_v_var = Some(v_idx);
+                                        }
+                                    }
                                 }
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
+                            });
                     }
 
                     // Trajectory overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        Self::section_header(ui, "Trajectory");
-                        ui.add_space(3.0);
-                        ui.checkbox(&mut self.ui_state.trajectory_enabled, egui::RichText::new("Enabled").size(11.0));
+                        egui::CollapsingHeader::new(egui::RichText::new("Trajectory").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.checkbox(&mut self.ui_state.trajectory_enabled, egui::RichText::new("Enabled").size(11.0));
 
-                        if self.ui_state.trajectory_enabled {
-                            // Auto-detect trajectory pair on first enable
-                            if self.ui_state.trajectory_lon_var.is_none() {
-                                if let Some((lon_idx, lat_idx)) = crate::data::inference::detect_trajectory_pair(&file.variables) {
-                                    self.ui_state.trajectory_lon_var = Some(lon_idx);
-                                    self.ui_state.trajectory_lat_var = Some(lat_idx);
-                                    *self.data_generation += 1;
-                                }
-                            }
+                                if self.ui_state.trajectory_enabled {
+                                    // Auto-detect trajectory pair on first enable
+                                    if self.ui_state.trajectory_lon_var.is_none() {
+                                        if let Some((lon_idx, lat_idx)) = crate::data::inference::detect_trajectory_pair(&file.variables) {
+                                            self.ui_state.trajectory_lon_var = Some(lon_idx);
+                                            self.ui_state.trajectory_lat_var = Some(lat_idx);
+                                            *self.data_generation += 1;
+                                        }
+                                    }
 
-                            if self.ui_state.trajectory_lon_var.is_some() {
-                                let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("lon:").size(10.0));
-                                    let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
-                                    let mut lon_idx = self.ui_state.trajectory_lon_var.unwrap_or(0);
-                                    egui::ComboBox::from_id_salt("traj_lon_combo")
-                                        .selected_text(var_names.get(lon_idx).map(|s| s.as_str()).unwrap_or("?"))
-                                        .width(combo_w)
-                                        .show_ui(ui, |ui| {
-                                            for (i, name) in var_names.iter().enumerate() {
-                                                ui.selectable_value(&mut lon_idx, i, name);
-                                            }
+                                    if self.ui_state.trajectory_lon_var.is_some() {
+                                        let var_names: Vec<String> = file.variables.iter().map(|v| v.name.clone()).collect();
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("lon:").size(10.0));
+                                            let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
+                                            let mut lon_idx = self.ui_state.trajectory_lon_var.unwrap_or(0);
+                                            egui::ComboBox::from_id_salt("traj_lon_combo")
+                                                .selected_text(var_names.get(lon_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                                .width(combo_w)
+                                                .show_ui(ui, |ui| {
+                                                    for (i, name) in var_names.iter().enumerate() {
+                                                        ui.selectable_value(&mut lon_idx, i, name);
+                                                    }
+                                                });
+                                            self.ui_state.trajectory_lon_var = Some(lon_idx);
                                         });
-                                    self.ui_state.trajectory_lon_var = Some(lon_idx);
-                                });
-                                ui.horizontal(|ui| {
-                                    ui.label(egui::RichText::new("lat:").size(10.0));
-                                    let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
-                                    let mut lat_idx = self.ui_state.trajectory_lat_var.unwrap_or(0);
-                                    egui::ComboBox::from_id_salt("traj_lat_combo")
-                                        .selected_text(var_names.get(lat_idx).map(|s| s.as_str()).unwrap_or("?"))
-                                        .width(combo_w)
-                                        .show_ui(ui, |ui| {
-                                            for (i, name) in var_names.iter().enumerate() {
-                                                ui.selectable_value(&mut lat_idx, i, name);
-                                            }
+                                        ui.horizontal(|ui| {
+                                            ui.label(egui::RichText::new("lat:").size(10.0));
+                                            let combo_w = (ui.available_width() - crate::app::SP_SM).max(60.0);
+                                            let mut lat_idx = self.ui_state.trajectory_lat_var.unwrap_or(0);
+                                            egui::ComboBox::from_id_salt("traj_lat_combo")
+                                                .selected_text(var_names.get(lat_idx).map(|s| s.as_str()).unwrap_or("?"))
+                                                .width(combo_w)
+                                                .show_ui(ui, |ui| {
+                                                    for (i, name) in var_names.iter().enumerate() {
+                                                        ui.selectable_value(&mut lat_idx, i, name);
+                                                    }
+                                                });
+                                            self.ui_state.trajectory_lat_var = Some(lat_idx);
                                         });
-                                    self.ui_state.trajectory_lat_var = Some(lat_idx);
-                                });
 
-                                let mut trail = self.ui_state.trajectory_trail_length;
-                                if ui.add(egui::Slider::new(&mut trail, 10..=2000).logarithmic(true).text("Trail")).changed() {
-                                    self.ui_state.trajectory_trail_length = trail;
+                                        let mut trail = self.ui_state.trajectory_trail_length;
+                                        if ui.add(egui::Slider::new(&mut trail, 10..=2000).logarithmic(true).text("Trail")).changed() {
+                                            self.ui_state.trajectory_trail_length = trail;
+                                        }
+                                    } else {
+                                        ui.label(egui::RichText::new("No trajectory pair detected").size(10.0).color(crate::app::TEXT_CAPTION));
+                                    }
                                 }
-                            } else {
-                                ui.label(egui::RichText::new("No trajectory pair detected").size(10.0).color(crate::app::TEXT_CAPTION));
-                            }
-                        }
-                        ui.add_space(6.0);
-                        ui.separator();
-                        ui.add_space(6.0);
+                            });
                     }
 
                     // --- Suggestion ---
@@ -1742,67 +1890,65 @@ impl GeoScopeTabViewer<'_> {
                         let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
                         let suggestion = crate::data::inference::suggest_visualization(var, &inference, &file.variables);
                         if !self.ui_state.suggestion_dismissed {
-                            Self::section_header(ui, "Suggested");
-                            ui.add_space(2.0);
-                            ui.label(egui::RichText::new(&suggestion.description).size(10.0));
+                            egui::CollapsingHeader::new(egui::RichText::new("Suggested").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                                .default_open(true)
+                                .show(ui, |ui| {
+                                    ui.label(egui::RichText::new(&suggestion.description).size(10.0));
 
-                            ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new(
-                                    egui::RichText::new("Apply").size(10.0).color(egui::Color32::WHITE)
-                                ).fill(crate::app::PRIMARY).corner_radius(3.0)).clicked() {
-                                    // Apply suggestion
-                                    match suggestion.view_mode.as_str() {
-                                        "Globe" => self.ui_state.view_mode = ViewMode::Globe,
-                                        "Map" => self.ui_state.view_mode = ViewMode::Map,
-                                        "Profile" => self.ui_state.view_mode = ViewMode::Profile,
-                                        _ => {}
-                                    }
-                                    match suggestion.colormap.as_str() {
-                                        "RdBu_r" => self.ui_state.colormap = Colormap::RdBuR,
-                                        "Viridis" => self.ui_state.colormap = Colormap::Viridis,
-                                        _ => {}
-                                    }
-                                    if suggestion.symmetric {
-                                        if let Some(ref field) = file.field_data {
-                                            let abs_max = field.min.abs().max(field.max.abs());
-                                            self.ui_state.range_mode = RangeMode::Manual;
-                                            self.ui_state.manual_min = -abs_max;
-                                            self.ui_state.manual_max = abs_max;
+                                    ui.horizontal(|ui| {
+                                        if ui.add(egui::Button::new(
+                                            egui::RichText::new("Apply").size(10.0).color(egui::Color32::WHITE)
+                                        ).fill(crate::app::PRIMARY).corner_radius(3.0)).clicked() {
+                                            // Apply suggestion
+                                            match suggestion.view_mode.as_str() {
+                                                "Globe" => self.ui_state.view_mode = ViewMode::Globe,
+                                                "Map" => self.ui_state.view_mode = ViewMode::Map,
+                                                "Profile" => self.ui_state.view_mode = ViewMode::Profile,
+                                                _ => {}
+                                            }
+                                            match suggestion.colormap.as_str() {
+                                                "RdBu_r" => self.ui_state.colormap = Colormap::RdBuR,
+                                                "Viridis" => self.ui_state.colormap = Colormap::Viridis,
+                                                _ => {}
+                                            }
+                                            if suggestion.symmetric {
+                                                if let Some(ref field) = file.field_data {
+                                                    let abs_max = field.min.abs().max(field.max.abs());
+                                                    self.ui_state.range_mode = RangeMode::Manual;
+                                                    self.ui_state.manual_min = -abs_max;
+                                                    self.ui_state.manual_max = abs_max;
+                                                }
+                                            }
+                                            self.ui_state.contour_enabled = suggestion.overlays.contains(&"contours".to_string());
+                                            self.ui_state.streamline_enabled = suggestion.overlays.contains(&"streamlines".to_string());
+                                            if suggestion.overlays.contains(&"trajectory".to_string()) {
+                                                self.ui_state.trajectory_enabled = true;
+                                            }
+                                            *self.data_generation += 1;
                                         }
-                                    }
-                                    self.ui_state.contour_enabled = suggestion.overlays.contains(&"contours".to_string());
-                                    self.ui_state.streamline_enabled = suggestion.overlays.contains(&"streamlines".to_string());
-                                    if suggestion.overlays.contains(&"trajectory".to_string()) {
-                                        self.ui_state.trajectory_enabled = true;
-                                    }
-                                    *self.data_generation += 1;
-                                }
-                                if ui.button(egui::RichText::new("×").size(11.0)).clicked() {
-                                    self.ui_state.suggestion_dismissed = true;
-                                }
-                            });
-
-                            ui.add_space(6.0);
-                            ui.separator();
-                            ui.add_space(6.0);
+                                        if ui.button(egui::RichText::new("×").size(11.0)).clicked() {
+                                            self.ui_state.suggestion_dismissed = true;
+                                        }
+                                    });
+                                });
                         }
                     }
 
                     // --- Inference ---
-                    let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
-                    Self::section_header(ui, "Inference");
-                    ui.add_space(2.0);
-                    ui.label(egui::RichText::new(&inference.description).size(10.0));
-                    let confidence_label = match inference.confidence {
-                        crate::data::inference::InferenceLevel::L1StandardName => "L1: standard_name",
-                        crate::data::inference::InferenceLevel::L2NamePattern => "L2: name pattern",
-                        crate::data::inference::InferenceLevel::L3Statistics => "L3: statistics",
-                    };
-                    Self::dim_label(ui, confidence_label);
-
-                    ui.add_space(6.0);
-                    ui.separator();
-                    ui.add_space(6.0);
+                    {
+                        let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
+                        egui::CollapsingHeader::new(egui::RichText::new("Inference").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            .default_open(false)
+                            .show(ui, |ui| {
+                                ui.label(egui::RichText::new(&inference.description).size(10.0));
+                                let confidence_label = match inference.confidence {
+                                    crate::data::inference::InferenceLevel::L1StandardName => "L1: standard_name",
+                                    crate::data::inference::InferenceLevel::L2NamePattern => "L2: name pattern",
+                                    crate::data::inference::InferenceLevel::L3Statistics => "L3: statistics",
+                                };
+                                Self::dim_label(ui, confidence_label);
+                            });
+                    }
 
                     // --- Export ---
                     if file.field_data.is_some() {
@@ -1836,7 +1982,7 @@ impl GeoScopeTabViewer<'_> {
         }
     }
 
-    fn code_panel_ui(&mut self, ui: &mut egui::Ui) {
+    pub fn code_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Code").strong().size(13.0));

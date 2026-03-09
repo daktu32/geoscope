@@ -12,6 +12,11 @@ pub struct ProfileRenderer {
     title: String,
     /// Current time/level index to highlight on the plot (playhead marker).
     current_index: Option<usize>,
+    /// Secondary playhead for level (used in T-Lev heatmap).
+    level_index: Option<usize>,
+    /// When true, swap axes: y=axis_values (level), x=data values (meteorological convention).
+    /// When false, keep standard: x=axis_values (time), y=data values.
+    pub swap_axes: bool,
     /// Time × Level heatmap data + texture
     heatmap_data: Option<TimeLevelData>,
     heatmap_texture: Option<egui::TextureHandle>,
@@ -24,6 +29,8 @@ impl ProfileRenderer {
             data: None,
             title: String::new(),
             current_index: None,
+            level_index: None,
+            swap_axes: false,
             heatmap_data: None,
             heatmap_texture: None,
             heatmap_pending: None,
@@ -40,6 +47,10 @@ impl ProfileRenderer {
 
     pub fn set_current_index(&mut self, index: Option<usize>) {
         self.current_index = index;
+    }
+
+    pub fn set_level_index(&mut self, index: Option<usize>) {
+        self.level_index = index;
     }
 
     /// Override the display range (value axis min/max) for the profile line graph.
@@ -141,7 +152,9 @@ impl ProfileRenderer {
         let axis_range = axis_max - axis_min;
 
         // Compute points for the data line
-        // Convention: y-axis = level (top=first level, bottom=last), x-axis = value
+        // swap_axes=true (Vertical): y=axis(level), x=value
+        // swap_axes=false (TimeSeries): x=axis(time), y=value
+        let swap = self.swap_axes;
         let points: Option<Vec<egui::Pos2>> = if n >= 2 && range.abs() > 1e-20 {
             Some(
                 (0..n)
@@ -152,10 +165,17 @@ impl ProfileRenderer {
                             i as f32 / (n - 1) as f32
                         };
                         let v = (data.values[i] - data.min) / range;
-                        egui::pos2(
-                            plot.left() + v * plot.width(),
-                            plot.top() + t * plot.height(),
-                        )
+                        if swap {
+                            egui::pos2(
+                                plot.left() + v * plot.width(),
+                                plot.top() + t * plot.height(),
+                            )
+                        } else {
+                            egui::pos2(
+                                plot.left() + t * plot.width(),
+                                plot.bottom() - v * plot.height(),
+                            )
+                        }
                     })
                     .collect(),
             )
@@ -184,74 +204,101 @@ impl ProfileRenderer {
             painter.line_segment([plot.left_bottom(), plot.right_bottom()], axis_stroke);
             painter.line_segment([plot.left_bottom(), plot.left_top()], axis_stroke);
 
-            // --- X-axis ticks (value range) ---
-            let x_tick_count = compute_tick_count(n, 7);
             let tick_font = egui::FontId::monospace(9.0);
 
-            for i in 0..x_tick_count {
-                let frac = i as f32 / (x_tick_count - 1).max(1) as f32;
-                let x = plot.left() + frac * plot.width();
-                let val = data.min as f64 + frac as f64 * range as f64;
-
-                painter.line_segment(
-                    [egui::pos2(x, plot.bottom()), egui::pos2(x, plot.bottom() + 3.0)],
-                    axis_stroke,
-                );
-                painter.text(
-                    egui::pos2(x, plot.bottom() + 5.0),
-                    egui::Align2::CENTER_TOP,
-                    format_tick_value(val),
-                    tick_font.clone(),
-                    axis_color,
-                );
-            }
-
-            // X-axis label (value)
-            painter.text(
-                egui::pos2(plot.center().x, rect.bottom() - 4.0),
-                egui::Align2::CENTER_BOTTOM,
-                &data.value_label,
-                egui::FontId::monospace(10.0),
-                crate::app::TEXT_SECONDARY,
-            );
-
-            // --- Y-axis ticks (level/axis_values, top=first, bottom=last) ---
-            let y_tick_count = compute_tick_count(n, 6);
-
-            for i in 0..y_tick_count {
-                let frac = i as f32 / (y_tick_count - 1).max(1) as f32;
-                let y = plot.top() + frac * plot.height();
-                let val = axis_min + frac as f64 * axis_range;
-
-                painter.line_segment(
-                    [egui::pos2(plot.left() - 3.0, y), egui::pos2(plot.left(), y)],
-                    axis_stroke,
-                );
-                painter.text(
-                    egui::pos2(plot.left() - 5.0, y),
-                    egui::Align2::RIGHT_CENTER,
-                    format_tick_value(val),
-                    tick_font.clone(),
-                    axis_color,
-                );
-
-                if i > 0 && i < y_tick_count - 1 {
-                    let grid_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
+            if swap {
+                // Swapped axes: x=value, y=axis(level)
+                let x_tick_count = compute_tick_count(n, 7);
+                for i in 0..x_tick_count {
+                    let frac = i as f32 / (x_tick_count - 1).max(1) as f32;
+                    let x = plot.left() + frac * plot.width();
+                    let val = data.min as f64 + frac as f64 * range as f64;
                     painter.line_segment(
-                        [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
-                        egui::Stroke::new(0.5, grid_color),
+                        [egui::pos2(x, plot.bottom()), egui::pos2(x, plot.bottom() + 3.0)],
+                        axis_stroke,
+                    );
+                    painter.text(
+                        egui::pos2(x, plot.bottom() + 5.0), egui::Align2::CENTER_TOP,
+                        format_tick_value(val), tick_font.clone(), axis_color,
                     );
                 }
-            }
+                painter.text(
+                    egui::pos2(plot.center().x, rect.bottom() - 4.0), egui::Align2::CENTER_BOTTOM,
+                    &data.value_label, egui::FontId::monospace(10.0), crate::app::TEXT_SECONDARY,
+                );
 
-            // Y-axis label (level coordinate)
-            painter.text(
-                egui::pos2(rect.left() + 4.0, plot.center().y),
-                egui::Align2::LEFT_CENTER,
-                &data.axis_label,
-                egui::FontId::monospace(10.0),
-                crate::app::TEXT_SECONDARY,
-            );
+                let y_tick_count = compute_tick_count(n, 6);
+                for i in 0..y_tick_count {
+                    let frac = i as f32 / (y_tick_count - 1).max(1) as f32;
+                    let y = plot.top() + frac * plot.height();
+                    let val = axis_min + frac as f64 * axis_range;
+                    painter.line_segment(
+                        [egui::pos2(plot.left() - 3.0, y), egui::pos2(plot.left(), y)],
+                        axis_stroke,
+                    );
+                    painter.text(
+                        egui::pos2(plot.left() - 5.0, y), egui::Align2::RIGHT_CENTER,
+                        format_tick_value(val), tick_font.clone(), axis_color,
+                    );
+                    if i > 0 && i < y_tick_count - 1 {
+                        let grid_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
+                        painter.line_segment(
+                            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                            egui::Stroke::new(0.5, grid_color),
+                        );
+                    }
+                }
+                painter.text(
+                    egui::pos2(rect.left() + 4.0, plot.center().y), egui::Align2::LEFT_CENTER,
+                    &data.axis_label, egui::FontId::monospace(10.0), crate::app::TEXT_SECONDARY,
+                );
+            } else {
+                // Standard axes: x=axis(time), y=value
+                let x_tick_count = compute_tick_count(n, 7);
+                for i in 0..x_tick_count {
+                    let frac = i as f32 / (x_tick_count - 1).max(1) as f32;
+                    let x = plot.left() + frac * plot.width();
+                    let val = axis_min + frac as f64 * axis_range;
+                    painter.line_segment(
+                        [egui::pos2(x, plot.bottom()), egui::pos2(x, plot.bottom() + 3.0)],
+                        axis_stroke,
+                    );
+                    painter.text(
+                        egui::pos2(x, plot.bottom() + 5.0), egui::Align2::CENTER_TOP,
+                        format_tick_value(val), tick_font.clone(), axis_color,
+                    );
+                }
+                painter.text(
+                    egui::pos2(plot.center().x, rect.bottom() - 4.0), egui::Align2::CENTER_BOTTOM,
+                    &data.axis_label, egui::FontId::monospace(10.0), crate::app::TEXT_SECONDARY,
+                );
+
+                let y_tick_count = compute_tick_count(n, 6);
+                for i in 0..y_tick_count {
+                    let frac = i as f32 / (y_tick_count - 1).max(1) as f32;
+                    let y = plot.bottom() - frac * plot.height();
+                    let val = data.min as f64 + frac as f64 * range as f64;
+                    painter.line_segment(
+                        [egui::pos2(plot.left() - 3.0, y), egui::pos2(plot.left(), y)],
+                        axis_stroke,
+                    );
+                    painter.text(
+                        egui::pos2(plot.left() - 5.0, y), egui::Align2::RIGHT_CENTER,
+                        format_tick_value(val), tick_font.clone(), axis_color,
+                    );
+                    if i > 0 && i < y_tick_count - 1 {
+                        let grid_color = egui::Color32::from_rgba_premultiplied(255, 255, 255, 20);
+                        painter.line_segment(
+                            [egui::pos2(plot.left(), y), egui::pos2(plot.right(), y)],
+                            egui::Stroke::new(0.5, grid_color),
+                        );
+                    }
+                }
+                painter.text(
+                    egui::pos2(rect.left() + 4.0, plot.center().y), egui::Align2::LEFT_CENTER,
+                    &data.value_label, egui::FontId::monospace(10.0), crate::app::TEXT_SECONDARY,
+                );
+            }
 
             // --- Data line and markers ---
             if let Some(ref points) = points {
@@ -270,12 +317,19 @@ impl ProfileRenderer {
                     let pt = points[idx];
                     let val = data.values[idx];
 
-                    // Horizontal line at current level (full width, semi-transparent)
+                    // Playhead line: horizontal if swapped (level), vertical if standard (time)
                     let playhead_color = egui::Color32::from_rgba_premultiplied(255, 200, 60, 140);
-                    painter.line_segment(
-                        [egui::pos2(plot.left(), pt.y), egui::pos2(plot.right(), pt.y)],
-                        egui::Stroke::new(1.0, playhead_color),
-                    );
+                    if swap {
+                        painter.line_segment(
+                            [egui::pos2(plot.left(), pt.y), egui::pos2(plot.right(), pt.y)],
+                            egui::Stroke::new(1.0, playhead_color),
+                        );
+                    } else {
+                        painter.line_segment(
+                            [egui::pos2(pt.x, plot.top()), egui::pos2(pt.x, plot.bottom())],
+                            egui::Stroke::new(1.0, playhead_color),
+                        );
+                    }
 
                     // Highlighted dot
                     painter.circle_filled(pt, 5.0, playhead_color);
@@ -323,13 +377,13 @@ impl ProfileRenderer {
                         crosshair_stroke,
                     );
 
-                    // Find nearest data point (by y = level axis)
+                    // Find nearest data point (by axis direction: y if swapped, x if standard)
                     let mut best_idx = 0;
                     let mut best_dist = f32::INFINITY;
                     for (i, &pt) in points.iter().enumerate() {
-                        let dy = (pt.y - hover_pos.y).abs();
-                        if dy < best_dist {
-                            best_dist = dy;
+                        let d = if swap { (pt.y - hover_pos.y).abs() } else { (pt.x - hover_pos.x).abs() };
+                        if d < best_dist {
+                            best_dist = d;
                             best_idx = i;
                         }
                     }
@@ -477,14 +531,27 @@ impl ProfileRenderer {
             label_color,
         );
 
-        // Playhead line (current time)
+        // Playhead lines
+        let playhead_color = egui::Color32::from_rgba_premultiplied(255, 200, 60, 180);
+        // Time playhead (vertical line on x-axis)
         if let Some(t_idx) = self.current_index {
             if data.n_time > 1 {
                 let frac = t_idx as f32 / (data.n_time - 1) as f32;
                 let x = plot_rect.min.x + frac * plot_rect.width();
                 painter.line_segment(
                     [egui::pos2(x, plot_rect.top()), egui::pos2(x, plot_rect.bottom())],
-                    egui::Stroke::new(1.0, egui::Color32::from_rgb(255, 200, 50)),
+                    egui::Stroke::new(1.5, playhead_color),
+                );
+            }
+        }
+        // Level playhead (horizontal line on y-axis)
+        if let Some(lev_idx) = self.level_index {
+            if data.n_level > 1 {
+                let frac = lev_idx as f32 / (data.n_level - 1) as f32;
+                let y = plot_rect.min.y + frac * plot_rect.height();
+                painter.line_segment(
+                    [egui::pos2(plot_rect.left(), y), egui::pos2(plot_rect.right(), y)],
+                    egui::Stroke::new(1.5, playhead_color),
                 );
             }
         }

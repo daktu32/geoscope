@@ -19,6 +19,8 @@ pub struct HovmollerRenderer {
     pending_image: Option<egui::ColorImage>,
     n_lon: usize,
     n_time: usize,
+    /// Current time index for playhead line
+    pub current_time: Option<usize>,
 }
 
 impl HovmollerRenderer {
@@ -28,6 +30,7 @@ impl HovmollerRenderer {
             pending_image: None,
             n_lon: 0,
             n_time: 0,
+            current_time: None,
         }
     }
 
@@ -165,6 +168,19 @@ impl HovmollerRenderer {
             font.clone(),
             label_color,
         );
+
+        // Time playhead line
+        if let Some(t_idx) = self.current_time {
+            if self.n_time > 1 {
+                let frac = t_idx as f32 / (self.n_time - 1) as f32;
+                let y = plot_rect.min.y + frac * plot_rect.height();
+                let playhead_color = egui::Color32::from_rgba_premultiplied(255, 200, 60, 180);
+                painter.line_segment(
+                    [egui::pos2(plot_rect.left(), y), egui::pos2(plot_rect.right(), y)],
+                    egui::Stroke::new(1.5, playhead_color),
+                );
+            }
+        }
 
         // Border around plot area
         painter.rect_stroke(

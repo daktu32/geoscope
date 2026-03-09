@@ -1,5 +1,5 @@
 use eframe::CreationContext;
-use egui_dock::{DockArea, DockState, NodeIndex};
+use egui_dock::{DockArea, DockState};
 
 use std::collections::HashMap;
 
@@ -120,6 +120,7 @@ pub struct GeoScopeApp {
     /// Track profile_point changes separately so clicks reload even during animation
     last_profile_point: Option<(usize, usize)>,
     last_profile_mode: crate::ui::ProfileMode,
+    last_profile_var: Option<(usize, usize)>, // (file_idx, var_idx)
     contour_generation: u64,
     streamline_generation: u64,
     trajectory_generation: u64,
@@ -141,10 +142,8 @@ impl GeoScopeApp {
 
         let mut globe_renderer = GlobeRenderer::new(cc);
 
-        let mut dock_state = DockState::new(vec![Tab::Viewport]);
-        let surface = dock_state.main_surface_mut();
-        surface.split_left(NodeIndex::root(), 0.15, vec![Tab::DataBrowser]);
-        surface.split_right(NodeIndex::root(), 0.80, vec![Tab::Inspector, Tab::CodePanel]);
+        // Viewport-only dock; sidebars are native egui::SidePanel (collapsible)
+        let dock_state = DockState::new(vec![Tab::Viewport]);
 
         let mut ui_state = crate::ui::UiState::default();
         let mut map_renderer = MapRenderer::new();
@@ -245,6 +244,7 @@ impl GeoScopeApp {
             profile_generation: 0,
             last_profile_point: None,
             last_profile_mode: crate::ui::ProfileMode::Vertical,
+            last_profile_var: None,
             profile_is_time_series: false,
             contour_generation: 0,
             streamline_generation: 0,
@@ -352,7 +352,7 @@ fn dock_style(ctx: &egui::Context) -> egui_dock::Style {
     let mut style = egui_dock::Style::from_egui(ctx.style().as_ref());
 
     style.tab_bar.bg_fill = BG_DARK;
-    style.tab_bar.height = 28.0;
+    style.tab_bar.height = 0.0; // Hide tab bar — single viewport only
 
     style.tab.tab_body.bg_fill = BG_PANEL;
 
@@ -473,6 +473,10 @@ impl eframe::App for GeoScopeApp {
             }
         });
 
+        // Capture sidebar state before borrowing ui_state
+        let left_panel_open = self.ui_state.left_panel_open;
+        let right_panel_open = self.ui_state.right_panel_open;
+
         let mut tab_viewer = GeoScopeTabViewer {
             data_store: &mut self.data_store,
             globe_renderer: &mut self.globe_renderer,
@@ -552,6 +556,106 @@ impl eframe::App for GeoScopeApp {
                 });
             });
 
+        // --- Collapsible side panels (Web-style) ---
+
+        // Left panel: DataBrowser
+        if left_panel_open {
+            egui::SidePanel::left("data_browser_panel")
+                .resizable(true)
+                .default_width(160.0)
+                .min_width(120.0)
+                .max_width(300.0)
+                .frame(egui::Frame::new().fill(BG_PANEL).inner_margin(egui::Margin::same(4)))
+                .show_animated(ctx, true, |ui| {
+                    // Header: Data + open-file button + collapse
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("Data").strong().size(13.0).color(TEXT_HEADING));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("\u{2039}").size(22.0).color(TEXT_SECONDARY)
+                            ).frame(false)).on_hover_text("Hide sidebar [").clicked() {
+                                tab_viewer.ui_state.left_panel_open = false;
+                            }
+                            if ui.button(egui::RichText::new("+").size(14.0)).clicked() {
+                                let paths = rfd::FileDialog::new()
+                                    .add_filter("NetCDF", &["nc", "nc4", "netcdf"])
+                                    .pick_files()
+                                    .unwrap_or_default();
+                                tab_viewer.open_file_request.extend(paths);
+                            }
+                        });
+                    });
+                    ui.separator();
+                    tab_viewer.data_browser_ui(ui);
+                });
+        } else {
+            // Collapsed: thin strip with open button
+            egui::SidePanel::left("data_browser_collapsed")
+                .resizable(false)
+                .exact_width(28.0)
+                .frame(egui::Frame::new().fill(BG_DARK).inner_margin(egui::Margin::same(0)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("\u{203A}").size(22.0).color(TEXT_SECONDARY)
+                        ).frame(false)).on_hover_text("Show Data [").clicked() {
+                            tab_viewer.ui_state.left_panel_open = true;
+                        }
+                    });
+                });
+        }
+
+        // Right panel: Inspector / Code (sub-tabs)
+        if right_panel_open {
+            egui::SidePanel::right("inspector_panel")
+                .resizable(true)
+                .default_width(260.0)
+                .min_width(200.0)
+                .max_width(400.0)
+                .frame(egui::Frame::new().fill(BG_PANEL).inner_margin(egui::Margin::same(4)))
+                .show_animated(ctx, true, |ui| {
+                    // Header: sub-tabs + close button
+                    ui.horizontal(|ui| {
+                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 0, "Inspector").clicked() {
+                            tab_viewer.ui_state.right_panel_tab = 0;
+                        }
+                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 1, "Code").clicked() {
+                            tab_viewer.ui_state.right_panel_tab = 1;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.add(egui::Button::new(
+                                egui::RichText::new("\u{203A}").size(22.0).color(TEXT_SECONDARY)
+                            ).frame(false)).on_hover_text("Hide sidebar ]").clicked() {
+                                tab_viewer.ui_state.right_panel_open = false;
+                            }
+                        });
+                    });
+                    ui.separator();
+                    match tab_viewer.ui_state.right_panel_tab {
+                        0 => tab_viewer.inspector_ui(ui),
+                        _ => tab_viewer.code_panel_ui(ui),
+                    }
+                });
+        } else {
+            // Collapsed: thin strip with open button
+            egui::SidePanel::right("inspector_collapsed")
+                .resizable(false)
+                .exact_width(28.0)
+                .frame(egui::Frame::new().fill(BG_DARK).inner_margin(egui::Margin::same(0)))
+                .show(ctx, |ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(4.0);
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new("\u{2039}").size(22.0).color(TEXT_SECONDARY)
+                        ).frame(false)).on_hover_text("Show Inspector ]").clicked() {
+                            tab_viewer.ui_state.right_panel_open = true;
+                        }
+                    });
+                });
+        }
+
+        // Central: Viewport dock
         DockArea::new(&mut self.dock_state)
             .style(dock_style(ctx))
             .show(ctx, &mut tab_viewer);
@@ -897,12 +1001,17 @@ impl eframe::App for GeoScopeApp {
         // During animation, skip reload unless the point or mode changed (user interaction).
         let need_profile = self.ui_state.view_mode == crate::ui::ViewMode::Profile
             || (self.ui_state.profile_split && self.ui_state.profile_point.is_some());
-        let profile_point_changed = self.ui_state.profile_point != self.last_profile_point
-            || self.ui_state.profile_mode != self.last_profile_mode;
+        let current_var = self.data_store.active_file.and_then(|fi|
+            self.data_store.files.get(fi).and_then(|f| f.selected_variable.map(|vi| (fi, vi)))
+        );
+        let profile_input_changed = self.ui_state.profile_point != self.last_profile_point
+            || self.ui_state.profile_mode != self.last_profile_mode
+            || current_var != self.last_profile_var;
         let profile_stale = self.profile_generation != self.data_generation;
-        if need_profile && profile_stale && (!self.ui_state.playing || profile_point_changed) {
+        if need_profile && (profile_input_changed || (profile_stale && !self.ui_state.playing)) {
             self.last_profile_point = self.ui_state.profile_point;
             self.last_profile_mode = self.ui_state.profile_mode;
+            self.last_profile_var = current_var;
             if let Some(file_idx) = self.data_store.active_file {
                 if let Some(file) = self.data_store.files.get(file_idx) {
                     if let Some(var_idx) = file.selected_variable {
@@ -938,6 +1047,9 @@ impl eframe::App for GeoScopeApp {
                                 }
                                 crate::ui::RangeMode::Slice => None, // use data's own range
                             };
+
+                            // Vertical profile: swap axes (y=level, x=value); others: standard
+                            self.profile_renderer.swap_axes = mode == crate::ui::ProfileMode::Vertical;
 
                             match mode {
                                 crate::ui::ProfileMode::TimeLevelHeatmap => {
@@ -993,6 +1105,8 @@ impl eframe::App for GeoScopeApp {
                                         self.profile_renderer.set_data(profile);
                                         self.profile_renderer.set_current_index(None);
                                     } else {
+                                        // Fallback to time series (no level dim) — use standard axes
+                                        self.profile_renderer.swap_axes = false;
                                         self.profile_is_time_series = true;
                                         let level_idx = self.ui_state.level_index;
                                         if let Some(ts) = self.data_store.load_time_series_data(
@@ -1021,10 +1135,30 @@ impl eframe::App for GeoScopeApp {
             self.profile_generation = self.data_generation;
         }
 
-        // Sync profile playhead with current time index (time series only)
-        if need_profile && self.profile_is_time_series {
-            self.profile_renderer.set_current_index(Some(self.ui_state.time_index));
+        // Sync playheads: profile, hovmoller, cross-section
+        // Use profile mode (not stale flag) to determine which index to show
+        match self.ui_state.profile_mode {
+            crate::ui::ProfileMode::TimeSeries => {
+                if self.profile_is_time_series {
+                    self.profile_renderer.set_current_index(Some(self.ui_state.time_index));
+                }
+                self.profile_renderer.set_level_index(None);
+            }
+            crate::ui::ProfileMode::Vertical => {
+                if self.profile_is_time_series {
+                    self.profile_renderer.set_current_index(Some(self.ui_state.time_index));
+                } else {
+                    self.profile_renderer.set_current_index(Some(self.ui_state.level_index));
+                }
+                self.profile_renderer.set_level_index(None);
+            }
+            crate::ui::ProfileMode::TimeLevelHeatmap => {
+                self.profile_renderer.set_current_index(Some(self.ui_state.time_index));
+                self.profile_renderer.set_level_index(Some(self.ui_state.level_index));
+            }
         }
+        self.hovmoller_renderer.current_time = Some(self.ui_state.time_index);
+        self.cross_section_renderer.current_level = Some(self.ui_state.level_index);
 
         // Contour overlay data update
         if self.ui_state.contour_enabled && self.contour_generation != self.data_generation {
