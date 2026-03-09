@@ -95,22 +95,22 @@ brew install hdf5@1.10
 ```bash
 git clone https://github.com/daktu32/geoscope.git
 cd geoscope
-cargo run --release -- path/to/data.nc
+cargo run --release -- samples/rossby_haurwitz_sample.nc
 ```
 
 Or launch without arguments and use the **+** button in the Data Browser to open files.
 
-### Example with spmodel-rs Output
+### Sample Data
 
-```bash
-# Generate sample data with spmodel-rs
-cd ../spmodel-rs
-cargo run --release --example rossby_haurwitz
+Three sample NetCDF files are included in [`samples/`](samples/):
 
-# Visualize
-cd ../geoscope
-cargo run --release -- ../spmodel-rs/output/rossby_haurwitz.nc
-```
+| File | Description | Try |
+|------|-------------|-----|
+| `rossby_haurwitz_sample.nc` | Rossby-Haurwitz wave | Globe + contour (`C`) + streamlines (`V`) |
+| `beta_gyre_sample.nc` | Beta-plane gyre | Trajectory (`T`) + animation (`Space`) |
+| `held_suarez_sample.nc` | 3D atmosphere (10 levels) | Cross-section (`6`) + level slider |
+
+See [`samples/README.md`](samples/README.md) for details.
 
 ## Tech Stack
 
