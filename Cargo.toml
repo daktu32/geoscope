@@ -28,3 +28,11 @@ num-complex = "0.4"
 serde_json = "1"
 rhai = "1"
 ureq = { version = "2", features = ["json"] }
+
+# Optimize dependencies in debug mode for better dev-time performance
+[profile.dev.package."*"]
+opt-level = 2
+
+# Optimize ispack-rs even in debug (spectral transforms are CPU-heavy)
+[profile.dev.package.ispack-rs]
+opt-level = 3
