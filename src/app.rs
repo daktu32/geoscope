@@ -58,6 +58,9 @@ struct SessionState {
     profile_mode: crate::ui::ProfileMode,
     profile_split: bool,
     profile_point: Option<(usize, usize)>,
+    // Trajectory
+    trajectory_enabled: bool,
+    trajectory_trail_length: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +199,8 @@ impl GeoScopeApp {
                 ui_state.profile_mode = state.profile_mode;
                 ui_state.profile_split = state.profile_split;
                 ui_state.profile_point = state.profile_point;
+                ui_state.trajectory_enabled = state.trajectory_enabled;
+                ui_state.trajectory_trail_length = state.trajectory_trail_length;
 
                 // Restore camera
                 globe_renderer.cam_lon = state.globe_cam_lon;
@@ -442,6 +447,8 @@ impl eframe::App for GeoScopeApp {
             profile_mode: self.ui_state.profile_mode,
             profile_split: self.ui_state.profile_split,
             profile_point: self.ui_state.profile_point,
+            trajectory_enabled: self.ui_state.trajectory_enabled,
+            trajectory_trail_length: self.ui_state.trajectory_trail_length,
         };
         eframe::set_value(storage, APP_KEY, &state);
     }
@@ -927,6 +934,23 @@ impl eframe::App for GeoScopeApp {
             }
         }
 
+        // Handle Code Panel "Run" request (reverse sync: code → GUI)
+        if self.ui_state.code_panel_run_request {
+            self.ui_state.code_panel_run_request = false;
+            let parsed = crate::codegen::parser::parse_python(&self.ui_state.code_panel_text);
+            let changes = crate::codegen::parser::apply_to_ui_state(
+                &parsed,
+                &mut self.ui_state,
+                &mut self.data_store,
+            );
+            if changes.is_empty() {
+                self.ui_state.code_panel_status = "No changes detected".to_string();
+            } else {
+                self.ui_state.code_panel_status = format!("Applied: {}", changes.join(", "));
+                self.data_generation += 1;
+            }
+        }
+
         // Detect colormap change
         if self.ui_state.colormap != self.last_colormap {
             self.last_colormap = self.ui_state.colormap;
@@ -1340,7 +1364,27 @@ impl eframe::App for GeoScopeApp {
             self.streamline_overlay.clear();
         }
 
-        // Trajectory overlay data loading
+        // External trajectory file loading (JSON/CSV)
+        if self.ui_state.trajectory_external_request {
+            self.ui_state.trajectory_external_request = false;
+            if let Some(path) = self.ui_state.trajectory_external_path.clone() {
+                match crate::data::trajectory_loader::load_trajectory_from_file(&path) {
+                    Ok(traj_data) => {
+                        self.ui_state.trajectory_enabled = true;
+                        self.trajectory_overlay.set_data(traj_data);
+                        self.trajectory_generation = self.data_generation;
+                        self.ui_state.status_text = format!("Loaded trajectory: {}", path);
+                        log::info!("Loaded external trajectory from {path}");
+                    }
+                    Err(e) => {
+                        log::error!("Failed to load trajectory: {e}");
+                        self.ui_state.status_text = format!("Error: {e}");
+                    }
+                }
+            }
+        }
+
+        // Trajectory overlay data loading (NetCDF)
         if self.ui_state.trajectory_enabled
             && self.trajectory_generation != self.data_generation
         {

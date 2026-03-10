@@ -155,6 +155,10 @@ pub struct UiState {
     pub trajectory_lon_var: Option<usize>,
     pub trajectory_lat_var: Option<usize>,
     pub trajectory_trail_length: usize,
+    /// Path to an external trajectory file (JSON/CSV) to load
+    pub trajectory_external_path: Option<String>,
+    /// Signal to app.rs to load the external trajectory file
+    pub trajectory_external_request: bool,
     // Wavenumber filter
     pub wavenumber_filter_enabled: bool,
     pub wavenumber_cutoff: usize,
@@ -171,6 +175,11 @@ pub struct UiState {
     pub context_menu_lonlat: Option<(f32, f32)>,     // (lon_deg, lat_deg)
     /// Which sub-tab is active in the right panel: 0=Inspector, 1=Code
     pub right_panel_tab: usize,
+    // Code panel reverse sync
+    pub code_panel_text: String,
+    pub code_panel_edited: bool,
+    pub code_panel_run_request: bool,
+    pub code_panel_status: String,
 }
 
 /// Range mode for colormap scaling.
@@ -223,6 +232,8 @@ impl Default for UiState {
             trajectory_lon_var: None,
             trajectory_lat_var: None,
             trajectory_trail_length: 500,
+            trajectory_external_path: None,
+            trajectory_external_request: false,
             wavenumber_filter_enabled: false,
             wavenumber_cutoff: 0,
             wavenumber_n_max: 0,
@@ -234,6 +245,10 @@ impl Default for UiState {
             context_menu_pos: None,
             context_menu_grid: None,
             context_menu_lonlat: None,
+            code_panel_text: String::new(),
+            code_panel_edited: false,
+            code_panel_run_request: false,
+            code_panel_status: String::new(),
         }
     }
 }
@@ -1927,6 +1942,28 @@ impl GeoScopeTabViewer<'_> {
                                     } else {
                                         ui.label(egui::RichText::new("No trajectory pair detected").size(10.0).color(crate::app::TEXT_CAPTION));
                                     }
+
+                                    ui.separator();
+
+                                    // External file loading
+                                    if ui.add(egui::Button::new(
+                                        egui::RichText::new("Load File...").size(10.0)
+                                    ).corner_radius(3.0)).clicked() {
+                                        if let Some(path) = rfd::FileDialog::new()
+                                            .add_filter("Trajectory", &["json", "csv"])
+                                            .pick_file()
+                                        {
+                                            self.ui_state.trajectory_external_path = Some(path.display().to_string());
+                                            self.ui_state.trajectory_external_request = true;
+                                        }
+                                    }
+                                    if let Some(ext_path) = &self.ui_state.trajectory_external_path {
+                                        let fname = std::path::Path::new(ext_path)
+                                            .file_name()
+                                            .and_then(|n| n.to_str())
+                                            .unwrap_or("?");
+                                        ui.label(egui::RichText::new(format!("Ext: {fname}")).size(10.0).color(crate::app::TEXT_CAPTION));
+                                    }
                                 }
                             });
                     }
@@ -2033,27 +2070,61 @@ impl GeoScopeTabViewer<'_> {
         ui.horizontal(|ui| {
             ui.label(egui::RichText::new("Code").strong().size(13.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // Reset button (only when user has edited)
+                if self.ui_state.code_panel_edited {
+                    if ui.button(egui::RichText::new("Reset").size(11.0)).clicked() {
+                        self.ui_state.code_panel_edited = false;
+                        self.ui_state.code_panel_status.clear();
+                    }
+                }
+                // Run button (apply edited code to GUI)
+                if self.ui_state.code_panel_edited {
+                    if ui.button(egui::RichText::new("\u{25b6} Run").size(11.0)).clicked() {
+                        self.ui_state.code_panel_run_request = true;
+                    }
+                }
+                // Copy button
                 if ui.button(egui::RichText::new("Copy").size(11.0)).clicked() {
-                    let code = crate::codegen::python::generate_python(self.ui_state, self.data_store);
-                    ui.ctx().copy_text(code);
+                    let text = if self.ui_state.code_panel_edited {
+                        self.ui_state.code_panel_text.clone()
+                    } else {
+                        crate::codegen::python::generate_python(self.ui_state, self.data_store)
+                    };
+                    ui.ctx().copy_text(text);
                     self.ui_state.status_text = "Code copied to clipboard".to_string();
                 }
             });
         });
         ui.add_space(4.0);
         ui.separator();
+
+        // Status message after Run
+        if !self.ui_state.code_panel_status.is_empty() {
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(&self.ui_state.code_panel_status)
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(100, 200, 100)),
+            );
+        }
+
         ui.add_space(4.0);
 
-        let code = crate::codegen::python::generate_python(self.ui_state, self.data_store);
+        // When not edited, auto-sync from generate_python
+        if !self.ui_state.code_panel_edited {
+            self.ui_state.code_panel_text =
+                crate::codegen::python::generate_python(self.ui_state, self.data_store);
+        }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            let mut code_display = code;
-            ui.add(
-                egui::TextEdit::multiline(&mut code_display)
+            let response = ui.add(
+                egui::TextEdit::multiline(&mut self.ui_state.code_panel_text)
                     .code_editor()
-                    .desired_width(f32::INFINITY)
-                    .interactive(false),
+                    .desired_width(f32::INFINITY),
             );
+            if response.changed() {
+                self.ui_state.code_panel_edited = true;
+            }
         });
     }
 
