@@ -5,7 +5,7 @@
 <p align="center"><strong>Open. See. Explore.</strong> — GFD Data Visualization, Reimagined.</p>
 
 <p align="center">
-<img src="https://img.shields.io/badge/status-v0.4%20beta-2AA198" alt="Status">
+<img src="https://img.shields.io/badge/status-v0.5%20beta-2AA198" alt="Status">
 <img src="https://img.shields.io/badge/language-Rust-orange" alt="Language">
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
 </p>
@@ -49,14 +49,26 @@ Built as a modern replacement for GrADS / Panoply / ncview.
 
 ### Interaction
 
-- **Time Animation** — Play/pause with adjustable speed
-- **Level Selection** — Vertical level slider for 3D data
+- **Time Animation** — Play/pause with adjustable speed, frame-step buttons
+- **Level Selection** — Floating vertical level slider for 3D data
 - **Colormap Range** — Slice / Global / Manual scaling + symmetric (0-centered) mode
-- **Point Info** — Hover on Map to see lat/lon/value
+- **Point Info** — Hover on Map to see lat/lon/value; click Globe/Map to select profile point
+- **Interactive Profile** — Click Globe/Map → split view with vertical/time/T-Lev profile
 - **Multi-File** — Open multiple NetCDF files, switch between them
 - **Drag & Drop** — Drop NetCDF files to open instantly
-- **PNG Export** — Save with resolution scaling (1x/2x/4x), colorbar, and title
-- **Code Generation** — View equivalent Python (xarray + cartopy + matplotlib) code for current state
+- **PNG/GIF Export** — Publication-quality export with axes, colorbar, title; GIF animation export
+- **Code Generation** — Bidirectional Python (xarray + cartopy + matplotlib) code panel
+- **Rhai Scripting** — Programmable automation via Rhai script engine
+- **Spectral Filter** — Wavenumber truncation filter (ispack-rs integration)
+- **Context Menu** — Right-click Globe/Map for Profile here / Export PNG / Center here
+- **Collapsible Panels** — `[`/`]` keys to toggle Data Browser / Inspector
+- **Session Persistence** — Auto-save/restore app state across sessions
+
+### AI & Automation
+
+- **LLM Copilot** — Chat sidebar with Claude API (Explain / Explore quick actions)
+- **Command Palette** — `Cmd+K` fuzzy search for views, colormaps, projections, overlays, exports
+- **Recipe Save/Load** — Save visualization settings as .py recipes, load & apply
 
 ### 10 Colormaps
 
@@ -75,6 +87,9 @@ Diverging: RdBu_r, Coolwarm, BrBG, PiYG
 | `C` | Toggle contour overlay |
 | `V` | Toggle streamline overlay |
 | `T` | Toggle trajectory overlay |
+| `W` | Toggle spectral filter |
+| `[` / `]` | Toggle left / right panel |
+| `Cmd+K` | Open command palette |
 
 ## Quick Start
 
@@ -123,7 +138,10 @@ See [`samples/README.md`](samples/README.md) for download instructions.
 | GUI Framework | eframe + egui_dock | 0.33 / 0.18 |
 | GPU Rendering | wgpu (via eframe) | 27 |
 | Data I/O | netcdf-rs | 0.12 |
-| Image Export | image | 0.25 |
+| Image/GIF Export | image + gif | 0.25 / 0.13 |
+| Spectral Transforms | ispack-rs | path dep |
+| Scripting | rhai | 1 |
+| LLM API | ureq (Claude API) | 2 |
 | File Dialog | rfd | 0.15 |
 | HDF5 Backend | hdf5 (Homebrew) | 1.10 |
 
@@ -132,10 +150,12 @@ See [`samples/README.md`](samples/README.md) for download instructions.
 ```
 src/
 ├── main.rs                 # Entry point (D&D, 1280x800)
-├── app.rs                  # App state, eframe integration, dock layout
+├── app.rs                  # App state, eframe integration, SidePanel layout
 ├── data/
 │   ├── mod.rs              # DataStore, NetCDF I/O, field/profile/trajectory loading
-│   └── inference.rs        # 3-stage variable inference + visualization suggestion
+│   ├── inference.rs        # 3-stage variable inference + visualization suggestion
+│   ├── spectral_filter.rs  # Wavenumber filter (ispack-rs, spectral truncation)
+│   └── trajectory_loader.rs # External trajectory loading (JSON/CSV)
 ├── renderer/
 │   ├── common.rs           # Shared types, view_proj matrix, colormap LUT
 │   ├── globe.rs            # 3D globe (wgpu, UV sphere, WGSL shader)
@@ -148,11 +168,19 @@ src/
 │   ├── streamline.rs       # Streamlines — RK4 integration (egui)
 │   ├── trajectory.rs       # Trajectory overlay (egui)
 │   ├── vector_overlay.rs   # Wind arrows (egui)
-│   └── export.rs           # PNG export
+│   ├── bitmap_font.rs      # 5x7 bitmap font (publication export)
+│   └── export.rs           # PNG/GIF export (image + gif crate)
+├── copilot/
+│   ├── mod.rs              # LLM Copilot hub
+│   ├── llm_client.rs       # Claude API client (ureq, background thread)
+│   └── context.rs          # GFD domain knowledge + view context generation
 ├── codegen/
 │   ├── mod.rs              # Code generation hub
-│   └── python.rs           # Python code generator
-└── ui/mod.rs               # Tab system (DataBrowser, Viewport, Inspector, CodePanel)
+│   ├── python.rs           # Python (xarray+cartopy+matplotlib) generator
+│   ├── parser.rs           # Python → GUI reverse parser (bidirectional sync)
+│   ├── rhai_engine.rs      # Rhai script engine (GeoScope API)
+│   └── cmd_palette.rs      # Command palette (fuzzy match + action execution)
+└── ui/mod.rs               # UI panels (DataBrowser, Viewport, Inspector, CodePanel, Copilot)
 ```
 
 ## Roadmap
@@ -161,9 +189,9 @@ src/
 |---------|------|--------|
 | v0.1 | Globe + Map + Hovmoller + Spectrum + Export | Done |
 | v0.2 | Mollweide + Cross-Section + Vector Overlay + Level/Range control | Done |
-| v0.3 | Point Info + Profile + Contour + Streamline + Polar Stereo | Done |
-| **v0.4** | **Visualization Suggestion + Trajectory + Code Panel** | **Done (current)** |
-| v0.5 | LLM Copilot + Bidirectional Code Panel + Video export | Planned |
+| v0.3 | Point Info + Profile + Contour + Streamline + Polar Stereo + GIF Export + Spectral Filter | Done |
+| v0.4 | Visualization Suggestion + Trajectory + Code Panel + Rhai Scripting + Recipe Save/Load | Done |
+| **v0.5** | **LLM Copilot + Command Palette** | **Done (current)** |
 | Future | WebAssembly + WebGPU browser version | Planned |
 
 ## Relationship to dcmodel
