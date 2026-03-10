@@ -662,15 +662,35 @@ impl eframe::App for GeoScopeApp {
 
         // Export dialog
         if self.ui_state.export_dialog_open {
+            use crate::renderer::export::ExportFormat;
             let mut open = true;
             let mut do_export = false;
-            egui::Window::new("Export PNG")
+            let is_gif = self.ui_state.export_settings.format == ExportFormat::Gif;
+            let dialog_title = if is_gif { "Export GIF" } else { "Export PNG" };
+            egui::Window::new(dialog_title)
                 .open(&mut open)
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .show(ctx, |ui| {
                     ui.set_min_width(280.0);
+
+                    // Format selector
+                    ui.horizontal(|ui| {
+                        ui.label("Format:");
+                        ui.selectable_value(
+                            &mut self.ui_state.export_settings.format,
+                            ExportFormat::Png,
+                            "PNG",
+                        );
+                        ui.selectable_value(
+                            &mut self.ui_state.export_settings.format,
+                            ExportFormat::Gif,
+                            "GIF",
+                        );
+                    });
+
+                    ui.add_space(4.0);
 
                     // Title
                     ui.horizontal(|ui| {
@@ -711,6 +731,34 @@ impl eframe::App for GeoScopeApp {
                     // Colorbar toggle
                     ui.checkbox(&mut self.ui_state.export_settings.colorbar, "Include colorbar");
 
+                    // Publication quality toggle (PNG only)
+                    if self.ui_state.export_settings.format != ExportFormat::Gif {
+                        ui.checkbox(
+                            &mut self.ui_state.export_settings.publication,
+                            "Publication quality",
+                        );
+                    }
+
+                    // GIF-specific options
+                    if self.ui_state.export_settings.format == ExportFormat::Gif {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            ui.label("FPS:");
+                            ui.add(egui::Slider::new(&mut self.ui_state.export_settings.gif_fps, 1..=30));
+                        });
+
+                        // Show time step count
+                        if let Some(file_idx) = self.data_store.active_file {
+                            if let Some(n) = self.data_store.files[file_idx].time_steps {
+                                ui.label(
+                                    egui::RichText::new(format!("  {} frames", n))
+                                        .size(10.0)
+                                        .color(egui::Color32::from_gray(120)),
+                                );
+                            }
+                        }
+                    }
+
                     ui.add_space(4.0);
 
                     // Preview colormap bar
@@ -745,8 +793,13 @@ impl eframe::App for GeoScopeApp {
                     ui.add_space(4.0);
 
                     // Export button
+                    let btn_label = if self.ui_state.export_settings.format == ExportFormat::Gif {
+                        "Save GIF"
+                    } else {
+                        "Save PNG"
+                    };
                     if ui.add(egui::Button::new(
-                        egui::RichText::new("Save PNG").color(egui::Color32::WHITE).size(12.0)
+                        egui::RichText::new(btn_label).color(egui::Color32::WHITE).size(12.0)
                     ).fill(PRIMARY)).clicked() {
                         do_export = true;
                     }
@@ -755,45 +808,108 @@ impl eframe::App for GeoScopeApp {
                 self.ui_state.export_dialog_open = false;
             }
             if do_export {
-                if let Some(field) = self.data_store.active_field().cloned() {
-                    // Determine display range
-                    let (display_min, display_max) = match self.ui_state.range_mode {
-                        crate::ui::RangeMode::Slice => (field.min, field.max),
-                        crate::ui::RangeMode::Global => {
-                            self.global_range_cache.unwrap_or((field.min, field.max))
-                        }
-                        crate::ui::RangeMode::Manual => {
-                            let rmin = self.ui_state.manual_min;
-                            let rmax = self.ui_state.manual_max;
-                            if (rmax - rmin).abs() > f32::EPSILON { (rmin, rmax) } else { (field.min, field.max) }
-                        }
-                    };
+                let format = self.ui_state.export_settings.format;
+                match format {
+                    ExportFormat::Png => {
+                        if let Some(field) = self.data_store.active_field().cloned() {
+                            let (display_min, display_max) = match self.ui_state.range_mode {
+                                crate::ui::RangeMode::Slice => (field.min, field.max),
+                                crate::ui::RangeMode::Global => {
+                                    self.global_range_cache.unwrap_or((field.min, field.max))
+                                }
+                                crate::ui::RangeMode::Manual => {
+                                    let rmin = self.ui_state.manual_min;
+                                    let rmax = self.ui_state.manual_max;
+                                    if (rmax - rmin).abs() > f32::EPSILON { (rmin, rmax) } else { (field.min, field.max) }
+                                }
+                            };
 
-                    let default_name = format!("{}.png", self.ui_state.export_settings.title);
-                    if let Some(path) = rfd::FileDialog::new()
-                        .add_filter("PNG", &["png"])
-                        .set_file_name(&default_name)
-                        .save_file()
-                    {
-                        match crate::renderer::export::export_png_with_settings(
-                            &field,
-                            self.ui_state.colormap,
-                            display_min,
-                            display_max,
-                            &self.ui_state.export_settings,
-                            &path,
-                        ) {
-                            Ok(()) => {
-                                let s = self.ui_state.export_settings.scale;
-                                self.ui_state.status_text = format!(
-                                    "Exported {}x: {}",
-                                    s,
-                                    path.display()
-                                );
-                                self.ui_state.export_dialog_open = false;
+                            let default_name = format!("{}.png", self.ui_state.export_settings.title);
+                            if let Some(path) = rfd::FileDialog::new()
+                                .add_filter("PNG", &["png"])
+                                .set_file_name(&default_name)
+                                .save_file()
+                            {
+                                let result = if self.ui_state.export_settings.publication {
+                                    crate::renderer::export::export_publication_png(
+                                        &field,
+                                        self.ui_state.colormap,
+                                        display_min,
+                                        display_max,
+                                        &self.ui_state.export_settings,
+                                        &path,
+                                    )
+                                } else {
+                                    crate::renderer::export::export_png_with_settings(
+                                        &field,
+                                        self.ui_state.colormap,
+                                        display_min,
+                                        display_max,
+                                        &self.ui_state.export_settings,
+                                        &path,
+                                    )
+                                };
+                                match result {
+                                    Ok(()) => {
+                                        let s = self.ui_state.export_settings.scale;
+                                        self.ui_state.status_text = format!(
+                                            "Exported {}x: {}",
+                                            s,
+                                            path.display()
+                                        );
+                                        self.ui_state.export_dialog_open = false;
+                                    }
+                                    Err(e) => {
+                                        self.ui_state.status_text = format!("Export error: {e}");
+                                    }
+                                }
                             }
-                            Err(e) => {
-                                self.ui_state.status_text = format!("Export error: {e}");
+                        }
+                    }
+                    ExportFormat::Gif => {
+                        if let Some(file_idx) = self.data_store.active_file {
+                            if let Some(var_idx) = self.data_store.files[file_idx].selected_variable {
+                                let default_name = format!("{}.gif", self.ui_state.export_settings.title);
+                                if let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("GIF", &["gif"])
+                                    .set_file_name(&default_name)
+                                    .save_file()
+                                {
+                                    self.ui_state.status_text = "Exporting GIF...".to_string();
+                                    let level_idx = self.ui_state.level_index;
+                                    let settings = self.ui_state.export_settings.clone();
+                                    let colormap = self.ui_state.colormap;
+                                    let range_mode = self.ui_state.range_mode;
+                                    let manual_min = self.ui_state.manual_min;
+                                    let manual_max = self.ui_state.manual_max;
+                                    let global_range = self.global_range_cache;
+
+                                    match crate::renderer::export::export_gif(
+                                        &mut self.data_store,
+                                        file_idx,
+                                        var_idx,
+                                        level_idx,
+                                        &settings,
+                                        colormap,
+                                        &range_mode,
+                                        manual_min,
+                                        manual_max,
+                                        global_range,
+                                        &path,
+                                    ) {
+                                        Ok(n_frames) => {
+                                            self.ui_state.status_text = format!(
+                                                "Exported GIF ({} frames): {}",
+                                                n_frames,
+                                                path.display()
+                                            );
+                                            self.ui_state.export_dialog_open = false;
+                                        }
+                                        Err(e) => {
+                                            self.ui_state.status_text = format!("GIF export error: {e}");
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -838,6 +954,36 @@ impl eframe::App for GeoScopeApp {
             }
 
             if let Some(field) = self.data_store.active_field().cloned() {
+                // Apply wavenumber filter if enabled
+                let field = if self.ui_state.wavenumber_filter_enabled {
+                    if let Some(n_trunc) = crate::data::spectral_filter::detect_n_trunc(field.width, field.height) {
+                        let lat_s2n = self.data_store.files
+                            .get(self.data_store.active_file.unwrap_or(0))
+                            .map(|f| crate::data::spectral_filter::is_lat_south_to_north(f.grid.lat.as_deref()))
+                            .unwrap_or(true);
+                        let cutoff = self.ui_state.wavenumber_cutoff.min(n_trunc);
+                        if let Some(filtered) = crate::data::spectral_filter::wavenumber_filter(
+                            &field.values, field.width, field.height, n_trunc, cutoff, lat_s2n,
+                        ) {
+                            let min = filtered.iter().copied().fold(f32::INFINITY, f32::min);
+                            let max = filtered.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                            crate::data::FieldData {
+                                values: filtered,
+                                width: field.width,
+                                height: field.height,
+                                min,
+                                max,
+                            }
+                        } else {
+                            field
+                        }
+                    } else {
+                        field
+                    }
+                } else {
+                    field
+                };
+
                 if let Some(render_state) = frame.wgpu_render_state() {
                     // Determine display range based on range mode
                     let (display_min, display_max) = match self.ui_state.range_mode {

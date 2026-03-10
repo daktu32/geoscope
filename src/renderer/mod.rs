@@ -1,5 +1,6 @@
 // renderer/mod.rs — Hub for all renderer modules
 
+pub mod bitmap_font;
 pub mod common;
 pub mod contour;
 pub mod cross_section;

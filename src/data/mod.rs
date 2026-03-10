@@ -1,6 +1,7 @@
 use std::path::Path;
 
 pub mod inference;
+pub mod spectral_filter;
 
 /// Metadata for a single variable in a NetCDF file.
 #[derive(Debug, Clone)]

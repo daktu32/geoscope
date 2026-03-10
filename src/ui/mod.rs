@@ -155,6 +155,10 @@ pub struct UiState {
     pub trajectory_lon_var: Option<usize>,
     pub trajectory_lat_var: Option<usize>,
     pub trajectory_trail_length: usize,
+    // Wavenumber filter
+    pub wavenumber_filter_enabled: bool,
+    pub wavenumber_cutoff: usize,
+    pub wavenumber_n_max: usize,
     // Visualization suggestion
     pub suggestion: Option<crate::data::inference::VisualizationSuggestion>,
     pub suggestion_dismissed: bool,
@@ -219,6 +223,9 @@ impl Default for UiState {
             trajectory_lon_var: None,
             trajectory_lat_var: None,
             trajectory_trail_length: 500,
+            wavenumber_filter_enabled: false,
+            wavenumber_cutoff: 0,
+            wavenumber_n_max: 0,
             suggestion: None,
             suggestion_dismissed: false,
             left_panel_open: true,
@@ -528,6 +535,11 @@ impl GeoScopeTabViewer<'_> {
             // T: toggle trajectory
             if i.key_pressed(egui::Key::T) {
                 self.ui_state.trajectory_enabled = !self.ui_state.trajectory_enabled;
+            }
+            // W: toggle wavenumber filter
+            if i.key_pressed(egui::Key::W) {
+                self.ui_state.wavenumber_filter_enabled = !self.ui_state.wavenumber_filter_enabled;
+                *self.data_generation += 1;
             }
             // [: toggle left sidebar, ]: toggle right sidebar
             if i.key_pressed(egui::Key::OpenBracket) {
@@ -1600,6 +1612,40 @@ impl GeoScopeTabViewer<'_> {
                                 }
                             });
                         });
+
+                    // --- Spectral Filter ---
+                    if let Some(ref field) = file.field_data {
+                        if let Some(n_trunc) = crate::data::spectral_filter::detect_n_trunc(field.width, field.height) {
+                            if self.ui_state.wavenumber_n_max != n_trunc {
+                                self.ui_state.wavenumber_n_max = n_trunc;
+                                if self.ui_state.wavenumber_cutoff == 0 || self.ui_state.wavenumber_cutoff > n_trunc {
+                                    self.ui_state.wavenumber_cutoff = n_trunc;
+                                }
+                            }
+                            egui::CollapsingHeader::new(egui::RichText::new("Spectral Filter").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                                .default_open(false)
+                                .show(ui, |ui| {
+                                    if ui.checkbox(&mut self.ui_state.wavenumber_filter_enabled, egui::RichText::new("Wavenumber Filter").size(11.0)).changed() {
+                                        *self.data_generation += 1;
+                                    }
+                                    if self.ui_state.wavenumber_filter_enabled {
+                                        let mut cutoff = self.ui_state.wavenumber_cutoff;
+                                        let label = format!("n={}", cutoff);
+                                        let slider = egui::Slider::new(&mut cutoff, 1..=n_trunc)
+                                            .text(label);
+                                        if ui.add(slider).changed() {
+                                            self.ui_state.wavenumber_cutoff = cutoff;
+                                            *self.data_generation += 1;
+                                        }
+                                        ui.label(
+                                            egui::RichText::new(format!("T{} -> T{}", n_trunc, self.ui_state.wavenumber_cutoff))
+                                                .size(10.0)
+                                                .color(crate::app::TEXT_CAPTION),
+                                        );
+                                    }
+                                });
+                        }
+                    }
 
                     // --- Range ---
                     if let Some(ref field) = file.field_data {

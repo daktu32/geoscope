@@ -19,6 +19,9 @@ wgpu = "27"
 netcdf = "0.12"
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+gif = "0.13"
 rfd = "0.15"
 log = "0.4"
 env_logger = "0.11"
+ispack-rs = { path = "../ispack-rs", package = "ispack-rs" }
+num-complex = "0.4"
