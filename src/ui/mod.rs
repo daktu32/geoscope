@@ -184,6 +184,16 @@ pub struct UiState {
     pub rhai_script_text: String,
     pub rhai_run_request: bool,
     pub rhai_status: String,
+    // Copilot
+    pub copilot_messages: Vec<(String, String)>,
+    pub copilot_input: String,
+    pub copilot_submit: bool,
+    pub copilot_loading: bool,
+    pub copilot_error: Option<String>,
+    // Command Palette
+    pub cmd_palette_open: bool,
+    pub cmd_palette_input: String,
+    pub cmd_palette_action: Option<crate::codegen::cmd_palette::PaletteAction>,
 }
 
 /// Range mode for colormap scaling.
@@ -256,6 +266,14 @@ impl Default for UiState {
             rhai_script_text: String::new(),
             rhai_run_request: false,
             rhai_status: String::new(),
+            copilot_messages: Vec::new(),
+            copilot_input: String::new(),
+            copilot_submit: false,
+            copilot_loading: false,
+            copilot_error: None,
+            cmd_palette_open: false,
+            cmd_palette_input: String::new(),
+            cmd_palette_action: None,
         }
     }
 }
@@ -2229,6 +2247,116 @@ impl GeoScopeTabViewer<'_> {
             .iter()
             .find(|(name, _)| name == "time" || name == "t")
             .map(|(_, size)| *size)
+    }
+
+    pub fn copilot_ui(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(6.0);
+        ui.label(egui::RichText::new("Copilot").strong().size(13.0));
+        ui.add_space(4.0);
+
+        // API key warning
+        if !crate::copilot::llm_client::LlmClient::new().has_api_key() {
+            ui.colored_label(
+                egui::Color32::from_rgb(255, 180, 80),
+                "Set ANTHROPIC_API_KEY environment variable to enable Copilot",
+            );
+            ui.add_space(8.0);
+        }
+
+        // Chat messages (scrollable)
+        let available_height = ui.available_height() - 80.0;
+        egui::ScrollArea::vertical()
+            .max_height(available_height.max(100.0))
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                if self.ui_state.copilot_messages.is_empty() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(120, 120, 120),
+                        "Ask me about your data or GFD concepts.",
+                    );
+                }
+                for (role, content) in &self.ui_state.copilot_messages {
+                    let is_user = role == "user";
+                    let bg = if is_user {
+                        egui::Color32::from_rgb(30, 80, 80)
+                    } else {
+                        egui::Color32::from_rgb(45, 45, 55)
+                    };
+                    let frame = egui::Frame::new()
+                        .fill(bg)
+                        .corner_radius(6.0)
+                        .inner_margin(8.0)
+                        .outer_margin(egui::Margin::symmetric(0, 2));
+                    frame.show(ui, |ui| {
+                        let label = if is_user { "You" } else { "Copilot" };
+                        ui.label(
+                            egui::RichText::new(label)
+                                .strong()
+                                .size(11.0)
+                                .color(if is_user {
+                                    egui::Color32::from_rgb(100, 220, 200)
+                                } else {
+                                    egui::Color32::from_rgb(180, 160, 255)
+                                }),
+                        );
+                        ui.label(content.as_str());
+                    });
+                }
+                if self.ui_state.copilot_loading {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Thinking...");
+                    });
+                }
+                if let Some(ref err) = self.ui_state.copilot_error {
+                    ui.colored_label(egui::Color32::from_rgb(255, 100, 100), err.as_str());
+                }
+            });
+
+        ui.add_space(4.0);
+
+        // Quick action buttons
+        if !self.ui_state.copilot_loading {
+            ui.horizontal(|ui| {
+                if ui.button("Explain").clicked() {
+                    self.ui_state.copilot_input =
+                        "Explain what I'm currently looking at and its physical significance."
+                            .to_string();
+                    self.ui_state.copilot_submit = true;
+                }
+                if ui.button("Explore").clicked() {
+                    self.ui_state.copilot_input =
+                        "What interesting features can you see in this data? Suggest what to explore next."
+                            .to_string();
+                    self.ui_state.copilot_submit = true;
+                }
+            });
+        }
+
+        ui.add_space(4.0);
+
+        // Input area
+        ui.horizontal(|ui| {
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.ui_state.copilot_input)
+                    .desired_width(ui.available_width() - 40.0)
+                    .hint_text("Ask about your data..."),
+            );
+            let enter_pressed = response.lost_focus()
+                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let send_clicked = ui
+                .add_enabled(
+                    !self.ui_state.copilot_loading && !self.ui_state.copilot_input.is_empty(),
+                    egui::Button::new(egui::RichText::new("\u{27A4}").size(16.0)),
+                )
+                .clicked();
+            if (enter_pressed || send_clicked)
+                && !self.ui_state.copilot_input.is_empty()
+                && !self.ui_state.copilot_loading
+            {
+                self.ui_state.copilot_submit = true;
+            }
+        });
     }
 
     /// Returns (level_dim_name, level_dim_size) for the active variable, if any.

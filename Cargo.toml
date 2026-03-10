@@ -27,3 +27,4 @@ ispack-rs = { path = "../ispack-rs", package = "ispack-rs" }
 num-complex = "0.4"
 serde_json = "1"
 rhai = "1"
+ureq = { version = "2", features = ["json"] }

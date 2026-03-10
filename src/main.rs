@@ -1,5 +1,6 @@
 mod app;
 mod codegen;
+mod copilot;
 mod data;
 mod renderer;
 mod ui;

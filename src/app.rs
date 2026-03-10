@@ -137,6 +137,9 @@ pub struct GeoScopeApp {
     theme_applied: bool,
     /// Pre-computed colormap LUTs (256×RGBA per colormap).
     lut_cache: HashMap<Colormap, Vec<u8>>,
+    // LLM Copilot
+    llm_client: crate::copilot::llm_client::LlmClient,
+    llm_channel: Option<crate::copilot::llm_client::LlmChannel>,
 }
 
 impl GeoScopeApp {
@@ -266,6 +269,8 @@ impl GeoScopeApp {
                 }
                 m
             },
+            llm_client: crate::copilot::llm_client::LlmClient::new(),
+            llm_channel: None,
         }
     }
 }
@@ -630,6 +635,9 @@ impl eframe::App for GeoScopeApp {
                         if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 1, "Code").clicked() {
                             tab_viewer.ui_state.right_panel_tab = 1;
                         }
+                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 2, "Copilot").clicked() {
+                            tab_viewer.ui_state.right_panel_tab = 2;
+                        }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(egui::Button::new(
                                 egui::RichText::new("\u{203A}").size(22.0).color(TEXT_SECONDARY)
@@ -641,6 +649,7 @@ impl eframe::App for GeoScopeApp {
                     ui.separator();
                     match tab_viewer.ui_state.right_panel_tab {
                         0 => tab_viewer.inspector_ui(ui),
+                        2 => tab_viewer.copilot_ui(ui),
                         _ => tab_viewer.code_panel_ui(ui),
                     }
                 });
@@ -666,6 +675,80 @@ impl eframe::App for GeoScopeApp {
         DockArea::new(&mut self.dock_state)
             .style(dock_style(ctx))
             .show(ctx, &mut tab_viewer);
+
+        // --- Command Palette (Cmd+K) ---
+        ctx.input(|i| {
+            if i.modifiers.command && i.key_pressed(egui::Key::K) {
+                self.ui_state.cmd_palette_open = !self.ui_state.cmd_palette_open;
+                self.ui_state.cmd_palette_input.clear();
+            }
+            if i.key_pressed(egui::Key::Escape) && self.ui_state.cmd_palette_open {
+                self.ui_state.cmd_palette_open = false;
+            }
+        });
+        if self.ui_state.cmd_palette_open {
+            let screen = ctx.screen_rect();
+            let width = (screen.width() * 0.5).min(500.0);
+            let pos = egui::pos2(screen.center().x - width / 2.0, screen.min.y + 100.0);
+
+            egui::Window::new("command_palette")
+                .fixed_pos(pos)
+                .fixed_size([width, 0.0])
+                .title_bar(false)
+                .frame(
+                    egui::Frame::window(&ctx.style())
+                        .fill(BG_PANEL)
+                        .shadow(egui::Shadow {
+                            offset: [0, 4],
+                            blur: 16,
+                            spread: 4,
+                            color: egui::Color32::from_black_alpha(120),
+                        }),
+                )
+                .show(ctx, |ui| {
+                    let response = ui.add(
+                        egui::TextEdit::singleline(&mut self.ui_state.cmd_palette_input)
+                            .hint_text("Type a command...")
+                            .desired_width(width - 20.0)
+                            .font(egui::FontId::proportional(16.0)),
+                    );
+                    response.request_focus();
+
+                    ui.separator();
+
+                    let matches = crate::codegen::cmd_palette::match_commands(
+                        &self.ui_state.cmd_palette_input,
+                        &self.ui_state,
+                        &self.data_store,
+                    );
+
+                    for cmd in &matches {
+                        let text = format!("{} {}", cmd.icon, cmd.label);
+                        if ui
+                            .add(
+                                egui::Button::new(egui::RichText::new(text).size(14.0))
+                                    .frame(false)
+                                    .min_size(egui::vec2(width - 20.0, 28.0)),
+                            )
+                            .clicked()
+                        {
+                            self.ui_state.cmd_palette_action = Some(cmd.action.clone());
+                            self.ui_state.cmd_palette_open = false;
+                        }
+                    }
+
+                    if matches.is_empty() && !self.ui_state.cmd_palette_input.is_empty() {
+                        ui.label(
+                            egui::RichText::new("No matching commands").color(TEXT_CAPTION),
+                        );
+                    }
+
+                    if ui.input(|i| i.key_pressed(egui::Key::Enter)) && !matches.is_empty() {
+                        self.ui_state.cmd_palette_action = Some(matches[0].action.clone());
+                        self.ui_state.cmd_palette_open = false;
+                    }
+                });
+        }
 
         // Export dialog
         if self.ui_state.export_dialog_open {
@@ -972,6 +1055,65 @@ impl eframe::App for GeoScopeApp {
                 Err(e) => {
                     self.ui_state.rhai_status = format!("Error: {}", e);
                 }
+            }
+        }
+
+        // Handle Copilot submit request
+        if self.ui_state.copilot_submit {
+            self.ui_state.copilot_submit = false;
+            let user_input = std::mem::take(&mut self.ui_state.copilot_input);
+            if !user_input.is_empty() && self.llm_client.has_api_key() {
+                self.ui_state.copilot_messages.push(("user".to_string(), user_input.clone()));
+                self.ui_state.copilot_loading = true;
+                self.ui_state.copilot_error = None;
+
+                // Build system prompt with current view context
+                let mut system = crate::copilot::context::build_system_prompt();
+                system.push_str(&crate::copilot::context::build_view_context(
+                    &self.ui_state,
+                    &self.data_store,
+                ));
+
+                // Build message history
+                let messages: Vec<crate::copilot::llm_client::ChatMessage> = self
+                    .ui_state
+                    .copilot_messages
+                    .iter()
+                    .map(|(role, content)| crate::copilot::llm_client::ChatMessage {
+                        role: role.clone(),
+                        content: content.clone(),
+                    })
+                    .collect();
+
+                self.llm_channel = Some(self.llm_client.send_async(messages, &system));
+            }
+        }
+
+        // Poll LLM channel for responses
+        if let Some(ref channel) = self.llm_channel {
+            if let Some(result) = channel.poll() {
+                match result {
+                    Ok(text) => {
+                        self.ui_state.copilot_messages.push(("assistant".to_string(), text));
+                    }
+                    Err(err) => {
+                        self.ui_state.copilot_error = Some(err);
+                    }
+                }
+                self.ui_state.copilot_loading = false;
+                self.llm_channel = None;
+            }
+        }
+
+        // --- Command Palette action execution ---
+        if let Some(action) = self.ui_state.cmd_palette_action.take() {
+            if let Some(desc) = crate::codegen::cmd_palette::apply_action(
+                &action,
+                &mut self.ui_state,
+                &mut self.data_store,
+            ) {
+                self.ui_state.status_text = format!("⌘ {}", desc);
+                self.data_generation += 1;
             }
         }
 
