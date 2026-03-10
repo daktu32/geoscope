@@ -951,6 +951,30 @@ impl eframe::App for GeoScopeApp {
             }
         }
 
+        // Handle Rhai script "Run" request
+        if self.ui_state.rhai_run_request {
+            self.ui_state.rhai_run_request = false;
+            match crate::codegen::rhai_engine::execute_script(&self.ui_state.rhai_script_text) {
+                Ok(settings) => {
+                    let changes = crate::codegen::rhai_engine::apply_script_settings(
+                        &settings,
+                        &mut self.ui_state,
+                        &mut self.data_store,
+                    );
+                    if changes.is_empty() {
+                        self.ui_state.rhai_status = "No changes detected".to_string();
+                    } else {
+                        self.ui_state.rhai_status =
+                            format!("Applied: {}", changes.join(", "));
+                        self.data_generation += 1;
+                    }
+                }
+                Err(e) => {
+                    self.ui_state.rhai_status = format!("Error: {}", e);
+                }
+            }
+        }
+
         // Detect colormap change
         if self.ui_state.colormap != self.last_colormap {
             self.last_colormap = self.ui_state.colormap;

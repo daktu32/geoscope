@@ -180,6 +180,10 @@ pub struct UiState {
     pub code_panel_edited: bool,
     pub code_panel_run_request: bool,
     pub code_panel_status: String,
+    // Rhai script engine
+    pub rhai_script_text: String,
+    pub rhai_run_request: bool,
+    pub rhai_status: String,
 }
 
 /// Range mode for colormap scaling.
@@ -249,6 +253,9 @@ impl Default for UiState {
             code_panel_edited: false,
             code_panel_run_request: false,
             code_panel_status: String::new(),
+            rhai_script_text: String::new(),
+            rhai_run_request: false,
+            rhai_status: String::new(),
         }
     }
 }
@@ -2083,6 +2090,52 @@ impl GeoScopeTabViewer<'_> {
                         self.ui_state.code_panel_run_request = true;
                     }
                 }
+                // Save Recipe button
+                if ui.button(egui::RichText::new("Save").size(11.0)).clicked() {
+                    let code = if self.ui_state.code_panel_edited {
+                        self.ui_state.code_panel_text.clone()
+                    } else {
+                        crate::codegen::python::generate_python(self.ui_state, self.data_store)
+                    };
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Python", &["py"])
+                        .set_file_name("recipe.py")
+                        .save_file()
+                    {
+                        let header = Self::recipe_header(self.ui_state, self.data_store);
+                        let content = format!("{}{}", header, code);
+                        match std::fs::write(&path, &content) {
+                            Ok(_) => {
+                                self.ui_state.code_panel_status =
+                                    format!("Recipe saved to: {}", path.display());
+                            }
+                            Err(e) => {
+                                self.ui_state.code_panel_status =
+                                    format!("Save failed: {}", e);
+                            }
+                        }
+                    }
+                }
+                // Load Recipe button
+                if ui.button(egui::RichText::new("Load").size(11.0)).clicked() {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Python", &["py"])
+                        .pick_file()
+                    {
+                        match std::fs::read_to_string(&path) {
+                            Ok(contents) => {
+                                self.ui_state.code_panel_text = contents;
+                                self.ui_state.code_panel_edited = true;
+                                self.ui_state.code_panel_status =
+                                    format!("Recipe loaded from: {}", path.display());
+                            }
+                            Err(e) => {
+                                self.ui_state.code_panel_status =
+                                    format!("Load failed: {}", e);
+                            }
+                        }
+                    }
+                }
                 // Copy button
                 if ui.button(egui::RichText::new("Copy").size(11.0)).clicked() {
                     let text = if self.ui_state.code_panel_edited {
@@ -2126,6 +2179,45 @@ impl GeoScopeTabViewer<'_> {
                 self.ui_state.code_panel_edited = true;
             }
         });
+    }
+
+    /// Generate a header comment for saved recipe files.
+    fn recipe_header(ui_state: &UiState, data_store: &DataStore) -> String {
+        let today = {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            // Simple date calculation (no chrono dependency needed)
+            let days = now / 86400;
+            let y = 1970 + (days * 400 / 146097); // approximate year
+            format!("{}", y)
+        };
+
+        let file_name = data_store
+            .active_file
+            .and_then(|fi| data_store.files.get(fi))
+            .map(|f| {
+                std::path::Path::new(&f.path)
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string()
+            })
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let var_name = data_store
+            .active_file
+            .and_then(|fi| data_store.files.get(fi))
+            .and_then(|f| f.selected_variable.map(|vi| f.variables[vi].name.clone()))
+            .unwrap_or_else(|| "N/A".to_string());
+
+        let view = format!("{:?}", ui_state.view_mode);
+
+        format!(
+            "# GeoScope Recipe\n# File: {}\n# Variable: {}\n# View: {}\n\n",
+            file_name, var_name, view
+        )
     }
 
     /// Returns the length of the time dimension for the active variable, if any.
