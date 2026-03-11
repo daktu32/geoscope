@@ -1,4 +1,5 @@
 use egui_dock::TabViewer;
+use crate::i18n::t;
 
 use crate::data::DataStore;
 use crate::renderer::GlobeRenderer;
@@ -31,6 +32,16 @@ pub struct HoverInfo {
     pub lon_deg: f32,
     pub lat_deg: f32,
     pub value: f32,
+}
+
+/// Spectrum view mode.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum SpectrumMode {
+    /// E(n): total wavenumber spectrum (sum over all m for each n)
+    #[default]
+    TotalWavenumber,
+    /// E(m): zonal wavenumber spectrum (sum over all n for each m)
+    ZonalWavenumber,
 }
 
 /// Profile view mode.
@@ -105,6 +116,7 @@ impl Colormap {
 /// Persistent UI state (stored in GeoScopeApp).
 #[derive(Debug)]
 pub struct UiState {
+    pub lang: crate::i18n::Lang,
     pub view_mode: ViewMode,
     pub colormap: Colormap,
     pub time_index: usize,
@@ -138,12 +150,15 @@ pub struct UiState {
     pub export_settings: crate::renderer::export::ExportSettings,
     // Point Info (cursor hover)
     pub hover_info: Option<HoverInfo>,
+    // Spectrum view
+    pub spectrum_mode: SpectrumMode,
     // Profile view
     pub profile_point: Option<(usize, usize)>, // (lon_idx, lat_idx)
     pub profile_mode: ProfileMode,
     /// Show profile alongside Globe/Map in split view
     pub profile_split: bool,
     // Zonal Mean
+    #[allow(dead_code)]
     pub zonal_mean_enabled: bool,
     // Contour overlay
     pub contour_enabled: bool,
@@ -164,6 +179,7 @@ pub struct UiState {
     pub wavenumber_cutoff: usize,
     pub wavenumber_n_max: usize,
     // Visualization suggestion
+    #[allow(dead_code)]
     pub suggestion: Option<crate::data::inference::VisualizationSuggestion>,
     pub suggestion_dismissed: bool,
     // Sidebar collapse state
@@ -190,6 +206,8 @@ pub struct UiState {
     pub copilot_submit: bool,
     pub copilot_loading: bool,
     pub copilot_error: Option<String>,
+    pub copilot_api_key_input: String,
+    pub copilot_api_key_set: bool, // flag to apply key to LlmClient
     // Command Palette
     pub cmd_palette_open: bool,
     pub cmd_palette_input: String,
@@ -211,10 +229,11 @@ pub enum RangeMode {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            lang: crate::i18n::Lang::default(),
             view_mode: ViewMode::Globe,
             colormap: Colormap::default(),
             time_index: 0,
-            status_text: "Ready".to_string(),
+            status_text: crate::i18n::t("ready").to_string(),
             playing: false,
             play_speed: 10.0,
             play_accumulator: 0.0,
@@ -235,6 +254,7 @@ impl Default for UiState {
             export_dialog_open: false,
             export_settings: crate::renderer::export::ExportSettings::default(),
             hover_info: None,
+            spectrum_mode: SpectrumMode::default(),
             profile_point: None,
             profile_mode: ProfileMode::default(),
             profile_split: false,
@@ -271,6 +291,8 @@ impl Default for UiState {
             copilot_submit: false,
             copilot_loading: false,
             copilot_error: None,
+            copilot_api_key_input: String::new(),
+            copilot_api_key_set: false,
             cmd_palette_open: false,
             cmd_palette_input: String::new(),
             cmd_palette_action: None,
@@ -280,6 +302,7 @@ impl Default for UiState {
 
 /// Tab types for the dock layout.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum Tab {
     DataBrowser,
     Viewport,
@@ -314,10 +337,10 @@ impl TabViewer for GeoScopeTabViewer<'_> {
 
     fn title(&mut self, tab: &mut Self::Tab) -> egui::WidgetText {
         match tab {
-            Tab::DataBrowser => "Data".into(),
-            Tab::Viewport => "Globe".into(),
-            Tab::Inspector => "Inspector".into(),
-            Tab::CodePanel => "Code".into(),
+            Tab::DataBrowser => t("data").into(),
+            Tab::Viewport => t("globe").into(),
+            Tab::Inspector => t("inspector").into(),
+            Tab::CodePanel => t("code").into(),
         }
     }
 
@@ -339,7 +362,7 @@ impl GeoScopeTabViewer<'_> {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
                 ui.label(
-                    egui::RichText::new("Drop a .nc file here\nor click Open")
+                    egui::RichText::new(t("drop_nc_sidebar"))
                         .color(crate::app::TEXT_CAPTION),
                 );
             });
@@ -416,7 +439,7 @@ impl GeoScopeTabViewer<'_> {
                                 ui.label(long_name.as_str());
                             }
                             if let Some(ref units) = var.units {
-                                ui.label(format!("Units: {units}"));
+                                ui.label(format!("{} {units}", t("units_label")));
                             }
                             ui.separator();
                             for (dim_name, dim_size) in &var.dimensions {
@@ -448,7 +471,15 @@ impl GeoScopeTabViewer<'_> {
         }
 
         if let Some((file_idx, var_idx)) = load_request {
+            let file_changed = self.data_store.active_file != Some(file_idx);
             self.data_store.active_file = Some(file_idx);
+            if file_changed {
+                // Reset overlay variable indices — they refer to the previous file
+                self.ui_state.vector_u_var = None;
+                self.ui_state.vector_v_var = None;
+                self.ui_state.trajectory_lon_var = None;
+                self.ui_state.trajectory_lat_var = None;
+            }
             if self.data_store.load_field(file_idx, var_idx).is_ok() {
                 *self.data_generation += 1;
                 self.ui_state.suggestion_dismissed = false;
@@ -601,18 +632,24 @@ impl GeoScopeTabViewer<'_> {
                     let new_t = (self.ui_state.time_index + steps) % time_len;
                     if new_t != self.ui_state.time_index {
                         self.ui_state.time_index = new_t;
-                        // Profile view only needs the playhead to move — skip expensive field reload
-                        if self.ui_state.view_mode != ViewMode::Profile {
+                        // Reload field data for Globe/Map; other views (Section, Spectrum)
+                        // use their own lazy loading keyed on data_generation.
+                        // Profile Vertical mode reads directly from file, so skip field reload there.
+                        // CrossSection/Profile read directly from file in their lazy loaders.
+                        // Spectrum needs field_data in memory, so don't skip it.
+                        let skip_field = matches!(self.ui_state.view_mode,
+                            ViewMode::Profile | ViewMode::CrossSection);
+                        if !skip_field {
                             if let Some(fi) = self.data_store.active_file {
                                 if let Some(file) = self.data_store.files.get(fi) {
                                     if let Some(vi) = file.selected_variable {
-                                        if self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index).is_ok() {
-                                            *self.data_generation += 1;
-                                        }
+                                        let _ = self.data_store.load_field_at(fi, vi, new_t, self.ui_state.level_index);
                                     }
                                 }
                             }
                         }
+                        // Always bump generation so lazy loaders (Section, Spectrum, Profile) refresh
+                        *self.data_generation += 1;
                     }
                 }
                 ui.ctx().request_repaint();
@@ -627,12 +664,12 @@ impl GeoScopeTabViewer<'_> {
                 ui.horizontal(|ui| {
                     for mode in [ViewMode::Globe, ViewMode::Map, ViewMode::Hovmoller, ViewMode::Spectrum, ViewMode::CrossSection, ViewMode::Profile] {
                         let label = match mode {
-                            ViewMode::Globe => "🌐 Globe",
-                            ViewMode::Map => "🗺 Map",
-                            ViewMode::Hovmoller => "📊 Hovmoller",
-                            ViewMode::Spectrum => "📈 Spectrum",
-                            ViewMode::CrossSection => "🔪 Section",
-                            ViewMode::Profile => "📍 Profile",
+                            ViewMode::Globe => t("view_globe"),
+                            ViewMode::Map => t("view_map"),
+                            ViewMode::Hovmoller => t("view_hovmoller"),
+                            ViewMode::Spectrum => t("view_spectrum"),
+                            ViewMode::CrossSection => t("view_section"),
+                            ViewMode::Profile => t("view_profile"),
                         };
                         let is_active = self.ui_state.view_mode == mode;
                         let text = egui::RichText::new(label).size(12.0).color(
@@ -740,8 +777,8 @@ impl GeoScopeTabViewer<'_> {
                                     self.ui_state.play_speed = next;
                                 }
                                 if fps_btn.hovered() {
-                                    egui::show_tooltip(ui.ctx(), ui.layer_id(), egui::Id::new("fps_tooltip"), |ui| {
-                                        ui.label("Click to cycle FPS");
+                                    fps_btn.show_tooltip_ui(|ui| {
+                                        ui.label(crate::i18n::t("cycle_fps"));
                                     });
                                 }
                             });
@@ -795,7 +832,7 @@ impl GeoScopeTabViewer<'_> {
         if self.data_store.files.is_empty() {
             let bg = central;
             crate::renderer::globe::paint_viewport_background(child_ui.painter(), bg);
-            child_ui.allocate_ui_at_rect(central, |ui| {
+            child_ui.scope_builder(egui::UiBuilder::new().max_rect(central), |ui| {
                 ui.vertical_centered(|ui| {
                     let half_h = central.height() / 2.0 - 60.0;
                     ui.add_space(half_h.max(20.0));
@@ -806,13 +843,13 @@ impl GeoScopeTabViewer<'_> {
                     );
                     ui.add_space(12.0);
                     ui.label(
-                        egui::RichText::new("Drop NetCDF file here")
+                        egui::RichText::new(t("drop_nc_main"))
                             .size(20.0)
                             .color(crate::app::TEXT_SECONDARY),
                     );
                     ui.add_space(6.0);
                     ui.label(
-                        egui::RichText::new("or use File → Open")
+                        egui::RichText::new(t("drop_nc_hint"))
                             .size(13.0)
                             .color(crate::app::TEXT_CAPTION),
                     );
@@ -1017,14 +1054,44 @@ impl GeoScopeTabViewer<'_> {
                 }
             }
             ViewMode::Hovmoller => self.hovmoller_renderer.paint(&mut child_ui),
-            ViewMode::Spectrum => self.spectrum_renderer.paint(&mut child_ui),
+            ViewMode::Spectrum => {
+                // Mode toolbar: E(n) / E(m)
+                child_ui.horizontal(|ui| {
+                    ui.add_space(4.0);
+                    let en_active = self.ui_state.spectrum_mode == SpectrumMode::TotalWavenumber;
+                    let en_text = egui::RichText::new("E(n)").size(11.0).color(
+                        if en_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(en_text).fill(
+                        if en_active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT }
+                    ).corner_radius(3.0)).clicked() && !en_active {
+                        self.ui_state.spectrum_mode = SpectrumMode::TotalWavenumber;
+                        *self.data_generation += 1;
+                    }
+                    let em_active = self.ui_state.spectrum_mode == SpectrumMode::ZonalWavenumber;
+                    let em_text = egui::RichText::new("E(m)").size(11.0).color(
+                        if em_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(em_text).fill(
+                        if em_active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT }
+                    ).corner_radius(3.0)).clicked() && !em_active {
+                        self.ui_state.spectrum_mode = SpectrumMode::ZonalWavenumber;
+                        *self.data_generation += 1;
+                    }
+                });
+                let display_mode = match self.ui_state.spectrum_mode {
+                    SpectrumMode::TotalWavenumber => crate::renderer::spectrum::SpectrumDisplayMode::TotalWavenumber,
+                    SpectrumMode::ZonalWavenumber => crate::renderer::spectrum::SpectrumDisplayMode::ZonalWavenumber,
+                };
+                self.spectrum_renderer.paint(&mut child_ui, display_mode);
+            }
             ViewMode::CrossSection => self.cross_section_renderer.paint(&mut child_ui),
             ViewMode::Profile => {
                 // Mode toolbar at top
                 child_ui.horizontal(|ui| {
                     ui.add_space(4.0);
                     let vert_active = self.ui_state.profile_mode == ProfileMode::Vertical;
-                    let vert_text = egui::RichText::new("Vertical").size(11.0).color(
+                    let vert_text = egui::RichText::new(t("vertical")).size(11.0).color(
                         if vert_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
                     );
                     if ui.add(egui::Button::new(vert_text).fill(
@@ -1034,7 +1101,7 @@ impl GeoScopeTabViewer<'_> {
                         *self.data_generation += 1;
                     }
                     let ts_active = self.ui_state.profile_mode == ProfileMode::TimeSeries;
-                    let ts_text = egui::RichText::new("Time").size(11.0).color(
+                    let ts_text = egui::RichText::new(t("time")).size(11.0).color(
                         if ts_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
                     );
                     if ui.add(egui::Button::new(ts_text).fill(
@@ -1044,7 +1111,7 @@ impl GeoScopeTabViewer<'_> {
                         *self.data_generation += 1;
                     }
                     let hm_active = self.ui_state.profile_mode == ProfileMode::TimeLevelHeatmap;
-                    let hm_text = egui::RichText::new("T-Lev").size(11.0).color(
+                    let hm_text = egui::RichText::new(t("t_lev")).size(11.0).color(
                         if hm_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
                     );
                     if ui.add(egui::Button::new(hm_text).fill(
@@ -1077,7 +1144,7 @@ impl GeoScopeTabViewer<'_> {
             } else {
                 format!("{:.1}\u{00b0}S", -info.lat_deg)
             };
-            let text = format!("{}, {}  Value: {:.4e}", lon_label, lat_label, info.value);
+            let text = format!("{}, {}  {} {:.4e}", lon_label, lat_label, t("value_label"), info.value);
             let font = egui::FontId::monospace(11.0);
             let painter = ui.painter();
             let galley = painter.layout_no_wrap(text, font, crate::app::TEXT_BODY);
@@ -1100,9 +1167,9 @@ impl GeoScopeTabViewer<'_> {
         }
 
         // Floating level slider overlay (left edge of viewport)
-        // Shown in Globe, Map, Profile, and CrossSection views
+        // Shown in Globe, Map, Profile views (NOT CrossSection — it has its own level axis)
         if let Some((level_name, level_size)) = level_info {
-            if matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map | ViewMode::Profile | ViewMode::CrossSection) {
+            if matches!(self.ui_state.view_mode, ViewMode::Globe | ViewMode::Map | ViewMode::Profile) {
                 let max_lev = level_size - 1;
                 let mut lev = self.ui_state.level_index.min(max_lev);
 
@@ -1279,7 +1346,7 @@ impl GeoScopeTabViewer<'_> {
                             // UV → 3D sphere (match globe mesh: theta = 2*PI*u, phi = PI*v)
                             let theta = 2.0 * std::f32::consts::PI * u;
                             let phi = std::f32::consts::PI * v;
-                            let lat_rad = std::f32::consts::FRAC_PI_2 - phi; // lat = 90° - phi
+                            let _lat_rad = std::f32::consts::FRAC_PI_2 - phi; // lat = 90° - phi
                             let sin_phi = phi.sin();
                             let x = sin_phi * theta.cos();
                             let y = phi.cos();
@@ -1349,7 +1416,7 @@ impl GeoScopeTabViewer<'_> {
                     ui.add_space(4.0);
                     // Vertical / Time toggle buttons
                     let vert_active = self.ui_state.profile_mode == ProfileMode::Vertical;
-                    let vert_text = egui::RichText::new("Vertical").size(10.0).color(
+                    let vert_text = egui::RichText::new(t("vertical")).size(10.0).color(
                         if vert_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
                     );
                     if ui.add(egui::Button::new(vert_text).frame(false)).clicked() && !vert_active {
@@ -1358,7 +1425,7 @@ impl GeoScopeTabViewer<'_> {
                     }
                     ui.label(egui::RichText::new("/").size(10.0).color(crate::app::TEXT_CAPTION));
                     let ts_active = self.ui_state.profile_mode == ProfileMode::TimeSeries;
-                    let ts_text = egui::RichText::new("Time").size(10.0).color(
+                    let ts_text = egui::RichText::new(t("time")).size(10.0).color(
                         if ts_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
                     );
                     if ui.add(egui::Button::new(ts_text).frame(false)).clicked() && !ts_active {
@@ -1367,7 +1434,7 @@ impl GeoScopeTabViewer<'_> {
                     }
                     ui.label(egui::RichText::new("/").size(10.0).color(crate::app::TEXT_CAPTION));
                     let hm_active = self.ui_state.profile_mode == ProfileMode::TimeLevelHeatmap;
-                    let hm_text = egui::RichText::new("T-Lev").size(10.0).color(
+                    let hm_text = egui::RichText::new(t("t_lev")).size(10.0).color(
                         if hm_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
                     );
                     if ui.add(egui::Button::new(hm_text).frame(false)).clicked() && !hm_active {
@@ -1429,7 +1496,7 @@ impl GeoScopeTabViewer<'_> {
 
                             // Profile at this point
                             if ui.add(egui::Button::new(
-                                egui::RichText::new("📍 Profile here").size(11.0).color(crate::app::TEXT_BODY)
+                                egui::RichText::new(t("profile_here")).size(11.0).color(crate::app::TEXT_BODY)
                             ).frame(false)).clicked() {
                                 self.ui_state.profile_point = Some((gx, gy));
                                 self.ui_state.profile_split = true;
@@ -1439,7 +1506,7 @@ impl GeoScopeTabViewer<'_> {
 
                             // Switch to Profile tab
                             if ui.add(egui::Button::new(
-                                egui::RichText::new("📊 Open Profile tab").size(11.0).color(crate::app::TEXT_BODY)
+                                egui::RichText::new(t("open_profile_tab")).size(11.0).color(crate::app::TEXT_BODY)
                             ).frame(false)).clicked() {
                                 self.ui_state.profile_point = Some((gx, gy));
                                 self.ui_state.view_mode = ViewMode::Profile;
@@ -1449,7 +1516,7 @@ impl GeoScopeTabViewer<'_> {
 
                             // Export PNG
                             if ui.add(egui::Button::new(
-                                egui::RichText::new("💾 Export PNG").size(11.0).color(crate::app::TEXT_BODY)
+                                egui::RichText::new(t("ctx_export_png")).size(11.0).color(crate::app::TEXT_BODY)
                             ).frame(false)).clicked() {
                                 self.ui_state.export_dialog_open = true;
                                 close_menu = true;
@@ -1458,7 +1525,7 @@ impl GeoScopeTabViewer<'_> {
                             // Center view here (Globe only)
                             if self.ui_state.view_mode == ViewMode::Globe {
                                 if ui.add(egui::Button::new(
-                                    egui::RichText::new("🌐 Center here").size(11.0).color(crate::app::TEXT_BODY)
+                                    egui::RichText::new(t("center_here")).size(11.0).color(crate::app::TEXT_BODY)
                                 ).frame(false)).clicked() {
                                     self.globe_renderer.cam_lon = lon.to_radians();
                                     self.globe_renderer.cam_lat = lat.to_radians();
@@ -1485,6 +1552,7 @@ impl GeoScopeTabViewer<'_> {
     }
 
     /// Helper: draw a section header label.
+    #[allow(dead_code)]
     fn section_header(ui: &mut egui::Ui, text: &str) {
         ui.label(egui::RichText::new(text).size(11.0).strong().color(crate::app::TEXT_SECONDARY));
     }
@@ -1529,7 +1597,7 @@ impl GeoScopeTabViewer<'_> {
                     let var = &file.variables[var_idx];
 
                     // --- Variable ---
-                    egui::CollapsingHeader::new(egui::RichText::new("Variable").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                    egui::CollapsingHeader::new(egui::RichText::new(t("variable")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                         .default_open(true)
                         .show(ui, |ui| {
                         let var_names: Vec<String> = file.variables.iter().enumerate()
@@ -1559,7 +1627,7 @@ impl GeoScopeTabViewer<'_> {
 
                     // --- Projection (Map view only) ---
                     if self.ui_state.view_mode == ViewMode::Map {
-                        egui::CollapsingHeader::new(egui::RichText::new("Projection").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("projection")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(true)
                             .show(ui, |ui| {
                                 egui::ComboBox::from_id_salt("projection_combo_main")
@@ -1580,19 +1648,19 @@ impl GeoScopeTabViewer<'_> {
                     }
 
                     // --- Colormap ---
-                    egui::CollapsingHeader::new(egui::RichText::new("Colormap").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                    egui::CollapsingHeader::new(egui::RichText::new(t("colormap_header")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                         .default_open(true)
                         .show(ui, |ui| {
                             egui::ComboBox::from_id_salt("colormap_combo")
                                 .selected_text(self.ui_state.colormap.label())
                                 .width(ui.available_width() - 8.0)
                                 .show_ui(ui, |ui| {
-                                    ui.label(egui::RichText::new("Sequential").size(10.0).color(crate::app::TEXT_CAPTION));
+                                    ui.label(egui::RichText::new(t("sequential")).size(10.0).color(crate::app::TEXT_CAPTION));
                                     for cm in Colormap::SEQUENTIAL {
                                         ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
                                     }
                                     ui.separator();
-                                    ui.label(egui::RichText::new("Diverging").size(10.0).color(crate::app::TEXT_CAPTION));
+                                    ui.label(egui::RichText::new(t("diverging")).size(10.0).color(crate::app::TEXT_CAPTION));
                                     for cm in Colormap::DIVERGING {
                                         ui.selectable_value(&mut self.ui_state.colormap, cm, cm.label());
                                     }
@@ -1633,11 +1701,11 @@ impl GeoScopeTabViewer<'_> {
                         });
 
                     // --- Display ---
-                    egui::CollapsingHeader::new(egui::RichText::new("Display").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                    egui::CollapsingHeader::new(egui::RichText::new(t("display")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                         .default_open(true)
                         .show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                for (label, is_smooth) in [("Grid", false), ("Smooth", true)] {
+                                for (label, is_smooth) in [(t("grid"), false), (t("smooth"), true)] {
                                     let active = self.ui_state.interpolated == is_smooth;
                                     let text = egui::RichText::new(label).size(10.0).color(
                                         if active { crate::app::PRIMARY } else { crate::app::TEXT_SECONDARY }
@@ -1662,10 +1730,10 @@ impl GeoScopeTabViewer<'_> {
                                     self.ui_state.wavenumber_cutoff = n_trunc;
                                 }
                             }
-                            egui::CollapsingHeader::new(egui::RichText::new("Spectral Filter").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            egui::CollapsingHeader::new(egui::RichText::new(t("spectral_filter")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                                 .default_open(false)
                                 .show(ui, |ui| {
-                                    if ui.checkbox(&mut self.ui_state.wavenumber_filter_enabled, egui::RichText::new("Wavenumber Filter").size(11.0)).changed() {
+                                    if ui.checkbox(&mut self.ui_state.wavenumber_filter_enabled, egui::RichText::new(t("wavenumber_filter")).size(11.0)).changed() {
                                         *self.data_generation += 1;
                                     }
                                     if self.ui_state.wavenumber_filter_enabled {
@@ -1689,7 +1757,7 @@ impl GeoScopeTabViewer<'_> {
 
                     // --- Range ---
                     if let Some(ref field) = file.field_data {
-                        egui::CollapsingHeader::new(egui::RichText::new("Range").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("range")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(true)
                             .show(ui, |ui| {
                                 // Min/Max DragValues with "to" separator (always visible)
@@ -1704,7 +1772,7 @@ impl GeoScopeTabViewer<'_> {
                                         if ui.add_sized([w, 20.0], egui::DragValue::new(&mut self.ui_state.manual_min).speed(0.001).max_decimals(4)).changed() {
                                             *self.data_generation += 1;
                                         }
-                                        ui.label(egui::RichText::new("to").size(10.0).color(crate::app::TEXT_CAPTION));
+                                        ui.label(egui::RichText::new(t("to")).size(10.0).color(crate::app::TEXT_CAPTION));
                                         if ui.add_sized([w, 20.0], egui::DragValue::new(&mut self.ui_state.manual_max).speed(0.001).max_decimals(4)).changed() {
                                             *self.data_generation += 1;
                                         }
@@ -1712,7 +1780,7 @@ impl GeoScopeTabViewer<'_> {
                                         ui.add_sized([w, 20.0], egui::Label::new(
                                             egui::RichText::new(format!("{:.3e}", display_min)).monospace().size(11.0)
                                         ));
-                                        ui.label(egui::RichText::new("to").size(10.0).color(crate::app::TEXT_CAPTION));
+                                        ui.label(egui::RichText::new(t("to")).size(10.0).color(crate::app::TEXT_CAPTION));
                                         ui.add_sized([w, 20.0], egui::Label::new(
                                             egui::RichText::new(format!("{:.3e}", display_max)).monospace().size(11.0)
                                         ));
@@ -1722,7 +1790,7 @@ impl GeoScopeTabViewer<'_> {
                                 // Scale mode buttons
                                 ui.add_space(2.0);
                                 ui.horizontal(|ui| {
-                                    for (mode, label) in [(RangeMode::Slice, "Slice"), (RangeMode::Global, "Global"), (RangeMode::Manual, "Manual")] {
+                                    for (mode, label) in [(RangeMode::Slice, t("slice")), (RangeMode::Global, t("global")), (RangeMode::Manual, t("manual"))] {
                                         let active = self.ui_state.range_mode == mode;
                                         let text = egui::RichText::new(label).size(10.0).color(
                                             if active { crate::app::PRIMARY } else { crate::app::TEXT_SECONDARY }
@@ -1746,7 +1814,7 @@ impl GeoScopeTabViewer<'_> {
                                     ui.add_space(2.0);
                                     let mut symmetric = self.ui_state.range_mode == RangeMode::Manual
                                         && (self.ui_state.manual_min + self.ui_state.manual_max).abs() < 1e-10;
-                                    if ui.checkbox(&mut symmetric, egui::RichText::new("Symmetric (0-centered)").size(10.0)).changed() {
+                                    if ui.checkbox(&mut symmetric, egui::RichText::new(t("symmetric_centered")).size(10.0)).changed() {
                                         if symmetric {
                                             let abs_max = display_min.abs().max(display_max.abs());
                                             self.ui_state.range_mode = RangeMode::Manual;
@@ -1763,21 +1831,21 @@ impl GeoScopeTabViewer<'_> {
 
                     // Cross-section (CrossSection view only)
                     if self.ui_state.view_mode == ViewMode::CrossSection {
-                        egui::CollapsingHeader::new(egui::RichText::new("Cross Section").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("cross_section")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(true)
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
-                                    Self::dim_label(ui, "Axis");
+                                    Self::dim_label(ui, t("axis"));
                                     if ui.selectable_label(
                                         self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Latitude,
-                                        egui::RichText::new("Fix Lat").size(10.0),
+                                        egui::RichText::new(t("fix_lat")).size(10.0),
                                     ).clicked() {
                                         self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Latitude;
                                         *self.data_generation += 1;
                                     }
                                     if ui.selectable_label(
                                         self.ui_state.cross_section_axis == crate::data::CrossSectionAxis::Longitude,
-                                        egui::RichText::new("Fix Lon").size(10.0),
+                                        egui::RichText::new(t("fix_lon")).size(10.0),
                                     ).clicked() {
                                         self.ui_state.cross_section_axis = crate::data::CrossSectionAxis::Longitude;
                                         *self.data_generation += 1;
@@ -1811,7 +1879,7 @@ impl GeoScopeTabViewer<'_> {
                                         }
                                     };
                                     let slider_text = if coord_label.is_empty() {
-                                        "Index".to_string()
+                                        t("index").to_string()
                                     } else {
                                         coord_label
                                     };
@@ -1825,10 +1893,10 @@ impl GeoScopeTabViewer<'_> {
 
                     // Vector overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        egui::CollapsingHeader::new(egui::RichText::new("Vector Overlay").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("vector_overlay")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(false)
                             .show(ui, |ui| {
-                                ui.checkbox(&mut self.ui_state.vector_overlay_enabled, egui::RichText::new("Enabled").size(11.0));
+                                ui.checkbox(&mut self.ui_state.vector_overlay_enabled, egui::RichText::new(t("enabled")).size(11.0));
 
                                 if self.ui_state.vector_overlay_enabled {
                                     if self.ui_state.vector_u_var.is_none() {
@@ -1869,11 +1937,11 @@ impl GeoScopeTabViewer<'_> {
                                     });
 
                                     let mut density = self.ui_state.vector_density;
-                                    if ui.add(egui::Slider::new(&mut density, 2..=20).text("Density")).changed() {
+                                    if ui.add(egui::Slider::new(&mut density, 2..=20).text(t("density"))).changed() {
                                         self.ui_state.vector_density = density;
                                     }
                                     let mut scale = self.ui_state.vector_scale;
-                                    if ui.add(egui::Slider::new(&mut scale, 0.1..=5.0).text("Scale")).changed() {
+                                    if ui.add(egui::Slider::new(&mut scale, 0.1..=5.0).text(t("scale"))).changed() {
                                         self.ui_state.vector_scale = scale;
                                     }
                                 }
@@ -1882,13 +1950,13 @@ impl GeoScopeTabViewer<'_> {
 
                     // Contour overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        egui::CollapsingHeader::new(egui::RichText::new("Contour Lines").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("contour_lines")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(false)
                             .show(ui, |ui| {
-                                ui.checkbox(&mut self.ui_state.contour_enabled, egui::RichText::new("Enabled").size(11.0));
+                                ui.checkbox(&mut self.ui_state.contour_enabled, egui::RichText::new(t("enabled")).size(11.0));
                                 if self.ui_state.contour_enabled {
                                     let mut levels = self.ui_state.contour_levels;
-                                    if ui.add(egui::Slider::new(&mut levels, 3..=30).text("Levels")).changed() {
+                                    if ui.add(egui::Slider::new(&mut levels, 3..=30).text(t("levels"))).changed() {
                                         self.ui_state.contour_levels = levels;
                                     }
                                 }
@@ -1897,10 +1965,10 @@ impl GeoScopeTabViewer<'_> {
 
                     // Streamline overlay (Map view only for now)
                     if self.ui_state.view_mode == ViewMode::Map {
-                        egui::CollapsingHeader::new(egui::RichText::new("Streamlines").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("streamlines")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(false)
                             .show(ui, |ui| {
-                                ui.checkbox(&mut self.ui_state.streamline_enabled, egui::RichText::new("Enabled").size(11.0));
+                                ui.checkbox(&mut self.ui_state.streamline_enabled, egui::RichText::new(t("enabled")).size(11.0));
                                 if self.ui_state.streamline_enabled {
                                     if self.ui_state.vector_u_var.is_none() {
                                         if let Some((u_idx, v_idx)) = crate::data::inference::detect_wind_pair(&file.variables) {
@@ -1914,10 +1982,10 @@ impl GeoScopeTabViewer<'_> {
 
                     // Trajectory overlay (Globe/Map views)
                     if self.ui_state.view_mode == ViewMode::Globe || self.ui_state.view_mode == ViewMode::Map {
-                        egui::CollapsingHeader::new(egui::RichText::new("Trajectory").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("trajectory")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(false)
                             .show(ui, |ui| {
-                                ui.checkbox(&mut self.ui_state.trajectory_enabled, egui::RichText::new("Enabled").size(11.0));
+                                ui.checkbox(&mut self.ui_state.trajectory_enabled, egui::RichText::new(t("enabled")).size(11.0));
 
                                 if self.ui_state.trajectory_enabled {
                                     // Auto-detect trajectory pair on first enable
@@ -1961,18 +2029,18 @@ impl GeoScopeTabViewer<'_> {
                                         });
 
                                         let mut trail = self.ui_state.trajectory_trail_length;
-                                        if ui.add(egui::Slider::new(&mut trail, 10..=2000).logarithmic(true).text("Trail")).changed() {
+                                        if ui.add(egui::Slider::new(&mut trail, 10..=2000).logarithmic(true).text(t("trail"))).changed() {
                                             self.ui_state.trajectory_trail_length = trail;
                                         }
                                     } else {
-                                        ui.label(egui::RichText::new("No trajectory pair detected").size(10.0).color(crate::app::TEXT_CAPTION));
+                                        ui.label(egui::RichText::new(t("no_trajectory_pair")).size(10.0).color(crate::app::TEXT_CAPTION));
                                     }
 
                                     ui.separator();
 
                                     // External file loading
                                     if ui.add(egui::Button::new(
-                                        egui::RichText::new("Load File...").size(10.0)
+                                        egui::RichText::new(t("load_file")).size(10.0)
                                     ).corner_radius(3.0)).clicked() {
                                         if let Some(path) = rfd::FileDialog::new()
                                             .add_filter("Trajectory", &["json", "csv"])
@@ -1998,14 +2066,14 @@ impl GeoScopeTabViewer<'_> {
                         let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
                         let suggestion = crate::data::inference::suggest_visualization(var, &inference, &file.variables);
                         if !self.ui_state.suggestion_dismissed {
-                            egui::CollapsingHeader::new(egui::RichText::new("Suggested").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                            egui::CollapsingHeader::new(egui::RichText::new(t("suggested")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                                 .default_open(true)
                                 .show(ui, |ui| {
                                     ui.label(egui::RichText::new(&suggestion.description).size(10.0));
 
                                     ui.horizontal(|ui| {
                                         if ui.add(egui::Button::new(
-                                            egui::RichText::new("Apply").size(10.0).color(egui::Color32::WHITE)
+                                            egui::RichText::new(t("apply")).size(10.0).color(egui::Color32::WHITE)
                                         ).fill(crate::app::PRIMARY).corner_radius(3.0)).clicked() {
                                             // Apply suggestion
                                             match suggestion.view_mode.as_str() {
@@ -2045,7 +2113,7 @@ impl GeoScopeTabViewer<'_> {
                     // --- Inference ---
                     {
                         let inference = crate::data::inference::infer_variable(var, file.field_data.as_ref());
-                        egui::CollapsingHeader::new(egui::RichText::new("Inference").size(11.0).strong().color(crate::app::TEXT_SECONDARY))
+                        egui::CollapsingHeader::new(egui::RichText::new(t("inference")).size(11.0).strong().color(crate::app::TEXT_SECONDARY))
                             .default_open(false)
                             .show(ui, |ui| {
                                 ui.label(egui::RichText::new(&inference.description).size(10.0));
@@ -2060,7 +2128,7 @@ impl GeoScopeTabViewer<'_> {
 
                     // --- Export ---
                     if file.field_data.is_some() {
-                        if ui.button(egui::RichText::new("Export PNG...").size(11.0)).clicked() {
+                        if ui.button(egui::RichText::new(t("export_png_btn")).size(11.0)).clicked() {
                             self.ui_state.export_settings.title = var.name.clone();
                             self.ui_state.export_dialog_open = true;
                         }
@@ -2068,7 +2136,7 @@ impl GeoScopeTabViewer<'_> {
                 } else {
                     ui.add_space(20.0);
                     ui.label(
-                        egui::RichText::new("Select a variable")
+                        egui::RichText::new(t("select_variable"))
                             .color(crate::app::TEXT_CAPTION),
                     );
                 }
@@ -2076,7 +2144,7 @@ impl GeoScopeTabViewer<'_> {
         } else {
             ui.add_space(20.0);
             ui.label(
-                egui::RichText::new("No file loaded")
+                egui::RichText::new(t("no_file_loaded"))
                     .color(crate::app::TEXT_CAPTION),
             );
         }
@@ -2093,23 +2161,23 @@ impl GeoScopeTabViewer<'_> {
     pub fn code_panel_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
-            ui.label(egui::RichText::new("Code").strong().size(13.0));
+            ui.label(egui::RichText::new(t("code")).strong().size(13.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 // Reset button (only when user has edited)
                 if self.ui_state.code_panel_edited {
-                    if ui.button(egui::RichText::new("Reset").size(11.0)).clicked() {
+                    if ui.button(egui::RichText::new(t("reset")).size(11.0)).clicked() {
                         self.ui_state.code_panel_edited = false;
                         self.ui_state.code_panel_status.clear();
                     }
                 }
                 // Run button (apply edited code to GUI)
                 if self.ui_state.code_panel_edited {
-                    if ui.button(egui::RichText::new("\u{25b6} Run").size(11.0)).clicked() {
+                    if ui.button(egui::RichText::new(t("run")).size(11.0)).clicked() {
                         self.ui_state.code_panel_run_request = true;
                     }
                 }
                 // Save Recipe button
-                if ui.button(egui::RichText::new("Save").size(11.0)).clicked() {
+                if ui.button(egui::RichText::new(t("save")).size(11.0)).clicked() {
                     let code = if self.ui_state.code_panel_edited {
                         self.ui_state.code_panel_text.clone()
                     } else {
@@ -2125,17 +2193,17 @@ impl GeoScopeTabViewer<'_> {
                         match std::fs::write(&path, &content) {
                             Ok(_) => {
                                 self.ui_state.code_panel_status =
-                                    format!("Recipe saved to: {}", path.display());
+                                    format!("{} {}", t("recipe_saved"), path.display());
                             }
                             Err(e) => {
                                 self.ui_state.code_panel_status =
-                                    format!("Save failed: {}", e);
+                                    format!("{} {}", t("save_failed"), e);
                             }
                         }
                     }
                 }
                 // Load Recipe button
-                if ui.button(egui::RichText::new("Load").size(11.0)).clicked() {
+                if ui.button(egui::RichText::new(t("load")).size(11.0)).clicked() {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter("Python", &["py"])
                         .pick_file()
@@ -2145,24 +2213,24 @@ impl GeoScopeTabViewer<'_> {
                                 self.ui_state.code_panel_text = contents;
                                 self.ui_state.code_panel_edited = true;
                                 self.ui_state.code_panel_status =
-                                    format!("Recipe loaded from: {}", path.display());
+                                    format!("{} {}", t("recipe_loaded"), path.display());
                             }
                             Err(e) => {
                                 self.ui_state.code_panel_status =
-                                    format!("Load failed: {}", e);
+                                    format!("{} {}", t("load_failed"), e);
                             }
                         }
                     }
                 }
                 // Copy button
-                if ui.button(egui::RichText::new("Copy").size(11.0)).clicked() {
+                if ui.button(egui::RichText::new(t("copy")).size(11.0)).clicked() {
                     let text = if self.ui_state.code_panel_edited {
                         self.ui_state.code_panel_text.clone()
                     } else {
                         crate::codegen::python::generate_python(self.ui_state, self.data_store)
                     };
                     ui.ctx().copy_text(text);
-                    self.ui_state.status_text = "Code copied to clipboard".to_string();
+                    self.ui_state.status_text = t("code_copied").to_string();
                 }
             });
         });
@@ -2201,7 +2269,7 @@ impl GeoScopeTabViewer<'_> {
 
     /// Generate a header comment for saved recipe files.
     fn recipe_header(ui_state: &UiState, data_store: &DataStore) -> String {
-        let today = {
+        let _today = {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -2251,14 +2319,26 @@ impl GeoScopeTabViewer<'_> {
 
     pub fn copilot_ui(&mut self, ui: &mut egui::Ui) {
         ui.add_space(6.0);
-        ui.label(egui::RichText::new("Copilot").strong().size(13.0));
+        ui.label(egui::RichText::new(t("copilot")).strong().size(13.0));
         ui.add_space(4.0);
 
-        // API key warning
-        if !crate::copilot::llm_client::LlmClient::new().has_api_key() {
+        // API key input (shown when no env var key is set and user hasn't entered one)
+        if !self.ui_state.copilot_api_key_set {
+            ui.label(egui::RichText::new(t("api_key")).size(11.0).color(crate::app::TEXT_CAPTION));
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.ui_state.copilot_api_key_input)
+                        .password(true)
+                        .desired_width(ui.available_width() - 44.0)
+                        .hint_text("sk-ant-..."),
+                );
+                if ui.button(t("set")).clicked() && !self.ui_state.copilot_api_key_input.is_empty() {
+                    self.ui_state.copilot_api_key_set = true;
+                }
+            });
             ui.colored_label(
-                egui::Color32::from_rgb(255, 180, 80),
-                "Set ANTHROPIC_API_KEY environment variable to enable Copilot",
+                crate::app::TEXT_CAPTION,
+                t("api_key_env_hint"),
             );
             ui.add_space(8.0);
         }
@@ -2272,7 +2352,7 @@ impl GeoScopeTabViewer<'_> {
                 if self.ui_state.copilot_messages.is_empty() {
                     ui.colored_label(
                         egui::Color32::from_rgb(120, 120, 120),
-                        "Ask me about your data or GFD concepts.",
+                        t("copilot_empty"),
                     );
                 }
                 for (role, content) in &self.ui_state.copilot_messages {
@@ -2288,7 +2368,7 @@ impl GeoScopeTabViewer<'_> {
                         .inner_margin(8.0)
                         .outer_margin(egui::Margin::symmetric(0, 2));
                     frame.show(ui, |ui| {
-                        let label = if is_user { "You" } else { "Copilot" };
+                        let label = if is_user { t("you") } else { t("copilot_name") };
                         ui.label(
                             egui::RichText::new(label)
                                 .strong()
@@ -2305,7 +2385,7 @@ impl GeoScopeTabViewer<'_> {
                 if self.ui_state.copilot_loading {
                     ui.horizontal(|ui| {
                         ui.spinner();
-                        ui.label("Thinking...");
+                        ui.label(t("thinking"));
                     });
                 }
                 if let Some(ref err) = self.ui_state.copilot_error {
@@ -2318,15 +2398,15 @@ impl GeoScopeTabViewer<'_> {
         // Quick action buttons
         if !self.ui_state.copilot_loading {
             ui.horizontal(|ui| {
-                if ui.button("Explain").clicked() {
+                if ui.button(t("explain")).clicked() {
                     self.ui_state.copilot_input =
-                        "Explain what I'm currently looking at and its physical significance."
+                        t("explain_prompt")
                             .to_string();
                     self.ui_state.copilot_submit = true;
                 }
-                if ui.button("Explore").clicked() {
+                if ui.button(t("explore")).clicked() {
                     self.ui_state.copilot_input =
-                        "What interesting features can you see in this data? Suggest what to explore next."
+                        t("explore_prompt")
                             .to_string();
                     self.ui_state.copilot_submit = true;
                 }
@@ -2340,7 +2420,7 @@ impl GeoScopeTabViewer<'_> {
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.ui_state.copilot_input)
                     .desired_width(ui.available_width() - 40.0)
-                    .hint_text("Ask about your data..."),
+                    .hint_text(t("ask_data_hint")),
             );
             let enter_pressed = response.lost_focus()
                 && ui.input(|i| i.key_pressed(egui::Key::Enter));

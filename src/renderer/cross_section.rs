@@ -71,7 +71,7 @@ impl CrossSectionRenderer {
 
         let Some(tex) = &self.texture else {
             ui.centered_and_justified(|ui| {
-                ui.label("No cross-section data available\n(requires variable with level dimension)");
+                ui.label(crate::i18n::t("no_cross_section"));
             });
             return;
         };

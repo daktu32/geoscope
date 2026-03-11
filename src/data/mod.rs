@@ -100,6 +100,7 @@ pub struct TimeLevelData {
     pub level_values: Vec<f64>,
     pub time_label: String,
     pub level_label: String,
+    #[allow(dead_code)]
     pub value_label: String,
     pub min: f32,
     pub max: f32,
@@ -119,6 +120,7 @@ pub struct VectorFieldData {
 #[derive(Debug, Clone)]
 pub struct TrajectoryData {
     pub points: Vec<(f32, f32)>, // (lon_deg, lat_deg) time-indexed
+    #[allow(dead_code)]
     pub name: String,
 }
 
@@ -331,8 +333,10 @@ impl DataStore {
         time_idx: usize,
         level_idx: usize,
     ) -> Result<(), String> {
-        let file_entry = &self.files[file_idx];
-        let var_info = &file_entry.variables[var_idx];
+        let file_entry = self.files.get(file_idx)
+            .ok_or_else(|| format!("File index {} out of range", file_idx))?;
+        let var_info = file_entry.variables.get(var_idx)
+            .ok_or_else(|| format!("Variable index {} out of range (file has {})", var_idx, file_entry.variables.len()))?;
 
         let file = netcdf::open(&file_entry.path)
             .map_err(|e| format!("Failed to reopen file: {e}"))?;
@@ -797,6 +801,7 @@ impl DataStore {
 
     /// Compute the zonal (longitudinal) mean of a 2D field.
     /// Returns a FieldData with width=1 and the same height as the input.
+    #[allow(dead_code)]
     pub fn compute_zonal_mean(&self, field: &FieldData) -> FieldData {
         let mut values = Vec::with_capacity(field.height);
         for lat in 0..field.height {

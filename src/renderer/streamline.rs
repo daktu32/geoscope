@@ -36,6 +36,7 @@ impl StreamlineOverlay {
     }
 
     /// Invalidate cached streamlines, forcing recomputation on next paint.
+    #[allow(dead_code)]
     pub fn invalidate(&mut self) {
         self.cache_valid = false;
     }

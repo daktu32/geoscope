@@ -1,5 +1,41 @@
 use std::sync::{Arc, Mutex};
 
+/// Config file path: ~/.geoscope/config.json
+fn config_path() -> Option<std::path::PathBuf> {
+    dirs_or_home().map(|d| d.join("config.json"))
+}
+
+fn dirs_or_home() -> Option<std::path::PathBuf> {
+    std::env::var("HOME")
+        .ok()
+        .map(|h| std::path::PathBuf::from(h).join(".geoscope"))
+}
+
+/// Load API key from ~/.geoscope/config.json
+pub fn load_saved_api_key() -> Option<String> {
+    let path = config_path()?;
+    let data = std::fs::read_to_string(path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&data).ok()?;
+    json["anthropic_api_key"].as_str().map(|s| s.to_string())
+}
+
+/// Save API key to ~/.geoscope/config.json
+pub fn save_api_key(key: &str) {
+    if let Some(dir) = dirs_or_home() {
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("config.json");
+        // Read existing config or create new
+        let mut json: serde_json::Value = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        json["anthropic_api_key"] = serde_json::Value::String(key.to_string());
+        if let Ok(s) = serde_json::to_string_pretty(&json) {
+            let _ = std::fs::write(&path, s);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LlmClient {
     api_key: String,
@@ -20,8 +56,11 @@ pub struct LlmChannel {
 
 impl LlmClient {
     pub fn new() -> Self {
+        // Priority: env var > config file
         let api_key = std::env::var("ANTHROPIC_API_KEY")
             .or_else(|_| std::env::var("CLAUDE_API_KEY"))
+            .ok()
+            .or_else(load_saved_api_key)
             .unwrap_or_default();
         Self {
             api_key,
@@ -31,6 +70,11 @@ impl LlmClient {
 
     pub fn has_api_key(&self) -> bool {
         !self.api_key.is_empty()
+    }
+
+    pub fn set_api_key(&mut self, key: &str) {
+        self.api_key = key.to_string();
+        save_api_key(key);
     }
 
     /// Send a chat request in a background thread. Returns a channel to poll for results.
@@ -101,6 +145,7 @@ impl LlmChannel {
         self.response.lock().unwrap().take()
     }
 
+    #[allow(dead_code)]
     pub fn is_loading(&self) -> bool {
         *self.is_loading.lock().unwrap()
     }

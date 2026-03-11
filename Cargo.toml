@@ -29,6 +29,10 @@ serde_json = "1"
 rhai = "1"
 ureq = { version = "2", features = ["json"] }
 
+# Optimize geoscope itself in debug (overlays, contours, etc. need speed)
+[profile.dev]
+opt-level = 1
+
 # Optimize dependencies in debug mode for better dev-time performance
 [profile.dev.package."*"]
 opt-level = 2

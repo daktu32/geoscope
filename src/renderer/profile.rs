@@ -61,6 +61,7 @@ impl ProfileRenderer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn set_heatmap_data(&mut self, data: TimeLevelData, colormap: Colormap) {
         self.set_heatmap_data_with_range(data, colormap, None);
     }
@@ -105,6 +106,7 @@ impl ProfileRenderer {
         self.heatmap_pending = None;
     }
 
+    #[allow(dead_code)]
     pub fn has_data(&self) -> bool {
         self.data.is_some()
     }

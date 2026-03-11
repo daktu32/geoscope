@@ -654,6 +654,11 @@ impl MapRenderer {
             }
         }
 
+        // Clamp pan so the map doesn't drift beyond visible bounds
+        let max_pan = (1.0 - 1.0 / self.zoom).max(0.0);
+        self.pan_x = self.pan_x.clamp(-max_pan, max_pan);
+        self.pan_y = self.pan_y.clamp(-max_pan, max_pan);
+
         let view_proj = build_ortho_view_proj(self.pan_x, self.pan_y, self.zoom, rect);
         let camera_uniform = CameraUniform {
             view_proj,

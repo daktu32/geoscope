@@ -12,6 +12,7 @@ pub struct PaletteCommand {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum PaletteAction {
     SetVariable(String),
     SetColormap(String),

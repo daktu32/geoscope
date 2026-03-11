@@ -2,6 +2,8 @@ mod app;
 mod codegen;
 mod copilot;
 mod data;
+mod i18n;
+mod mcp;
 mod renderer;
 mod ui;
 

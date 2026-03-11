@@ -1,2 +1,7 @@
 /target
 samples/*.nc
+trailer/clips/
+trailer/output/
+trailer/.tmp/
+trailer/bgm.mp3
+geoscope_log.txt

@@ -14,6 +14,7 @@ use crate::renderer::profile::ProfileRenderer;
 use crate::renderer::streamline::StreamlineOverlay;
 use crate::renderer::trajectory::TrajectoryOverlay;
 use crate::renderer::vector_overlay::VectorOverlay;
+use crate::i18n::t;
 use crate::ui::{Colormap, GeoScopeTabViewer, Tab};
 
 const APP_KEY: &str = "geoscope-session";
@@ -21,6 +22,9 @@ const APP_KEY: &str = "geoscope-session";
 /// Serializable session state for persistence across restarts.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct SessionState {
+    // Language
+    #[serde(default)]
+    lang: crate::i18n::Lang,
     // Opened files & selected variable
     file_paths: Vec<String>,
     active_file: Option<usize>,
@@ -81,12 +85,12 @@ pub(crate) const TEXT_HEADING: egui::Color32 = egui::Color32::from_rgb(245, 245,
 pub(crate) const TEXT_BODY: egui::Color32 = egui::Color32::from_rgb(224, 224, 232);
 pub(crate) const TEXT_SECONDARY: egui::Color32 = egui::Color32::from_rgb(156, 156, 176);
 pub(crate) const TEXT_CAPTION: egui::Color32 = egui::Color32::from_rgb(110, 110, 132);
-pub(crate) const TEXT_DISABLED: egui::Color32 = egui::Color32::from_rgb(74, 74, 94);
+pub(crate) const _TEXT_DISABLED: egui::Color32 = egui::Color32::from_rgb(74, 74, 94);
 
 // Semantic
 pub(crate) const ACCENT_ERROR: egui::Color32 = egui::Color32::from_rgb(255, 107, 107);
 pub(crate) const ACCENT_SUCCESS: egui::Color32 = egui::Color32::from_rgb(81, 207, 102);
-pub(crate) const ACCENT_MONO: egui::Color32 = egui::Color32::from_rgb(212, 165, 116);
+pub(crate) const _ACCENT_MONO: egui::Color32 = egui::Color32::from_rgb(212, 165, 116);
 
 // Divider
 pub(crate) const DIVIDER: egui::Color32 = egui::Color32::from_rgb(45, 45, 58);
@@ -95,7 +99,7 @@ pub(crate) const DIVIDER: egui::Color32 = egui::Color32::from_rgb(45, 45, 58);
 pub(crate) const SP_XS: f32 = 4.0;
 pub(crate) const SP_SM: f32 = 8.0;
 pub(crate) const SP_MD: f32 = 12.0;
-pub(crate) const SP_LG: f32 = 16.0;
+pub(crate) const _SP_LG: f32 = 16.0;
 
 /// GeoScope application state.
 pub struct GeoScopeApp {
@@ -116,6 +120,7 @@ pub struct GeoScopeApp {
     gpu_generation: u64,
     last_colormap: crate::ui::Colormap,
     hovmoller_generation: u64,
+    spectrum_generation: u64,
     cross_section_generation: u64,
     vector_generation: u64,
     profile_generation: u64,
@@ -130,6 +135,8 @@ pub struct GeoScopeApp {
     last_map_projection: crate::renderer::map::MapProjection,
     /// Pending file open requests from UI.
     open_file_request: Vec<std::path::PathBuf>,
+    /// Variable key used for spectrum Y-axis envelope; reset on change.
+    spectrum_var: Option<(usize, usize)>,
     /// Cached global (min, max) for the current variable. Reset on variable change.
     global_range_cache: Option<(f32, f32)>,
     /// Variable index used to compute the cached global range.
@@ -140,6 +147,11 @@ pub struct GeoScopeApp {
     // LLM Copilot
     llm_client: crate::copilot::llm_client::LlmClient,
     llm_channel: Option<crate::copilot::llm_client::LlmChannel>,
+    // Cached inference text for status bar (avoid per-frame recomputation)
+    cached_inference_text: Option<String>,
+    cached_inference_key: Option<(usize, usize)>, // (file_idx, var_idx)
+    // MCP bridge
+    mcp_queue: crate::mcp::listener::CommandQueue,
 }
 
 impl GeoScopeApp {
@@ -152,6 +164,13 @@ impl GeoScopeApp {
         let dock_state = DockState::new(vec![Tab::Viewport]);
 
         let mut ui_state = crate::ui::UiState::default();
+        // Check if API key exists (env var or saved config) — skip key input UI if so
+        if std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("CLAUDE_API_KEY").is_ok()
+            || crate::copilot::llm_client::load_saved_api_key().is_some()
+        {
+            ui_state.copilot_api_key_set = true;
+        }
         let mut map_renderer = MapRenderer::new();
         let mut data_store = DataStore::new();
         let mut restored_files = false;
@@ -182,6 +201,8 @@ impl GeoScopeApp {
                 restored_files = !data_store.files.is_empty();
 
                 // Restore UI state
+                ui_state.lang = state.lang;
+                crate::i18n::set_lang(state.lang);
                 ui_state.view_mode = state.view_mode;
                 ui_state.colormap = state.colormap;
                 ui_state.map_projection = state.map_projection;
@@ -247,6 +268,7 @@ impl GeoScopeApp {
             gpu_generation: 0,
             last_colormap: crate::ui::Colormap::default(),
             hovmoller_generation: 0,
+            spectrum_generation: 0,
             cross_section_generation: 0,
             vector_generation: 0,
             profile_generation: 0,
@@ -259,6 +281,7 @@ impl GeoScopeApp {
             trajectory_generation: 0,
             last_map_projection: crate::renderer::map::MapProjection::default(),
             open_file_request: Vec::new(),
+            spectrum_var: None,
             global_range_cache: None,
             global_range_var: None,
             theme_applied: false,
@@ -271,11 +294,57 @@ impl GeoScopeApp {
             },
             llm_client: crate::copilot::llm_client::LlmClient::new(),
             llm_channel: None,
+            cached_inference_text: None,
+            cached_inference_key: None,
+            mcp_queue: {
+                let q = crate::mcp::listener::new_command_queue();
+                crate::mcp::listener::start(q.clone(), cc.egui_ctx.clone());
+                q
+            },
         }
     }
 }
 
+fn load_japanese_font(ctx: &egui::Context) {
+    // Try to load a Japanese font from the system as a fallback for CJK glyphs.
+    // macOS: Hiragino Kaku Gothic, Linux: Noto Sans CJK, Windows: Yu Gothic
+    let candidates = [
+        // macOS
+        "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
+        "/System/Library/Fonts/ヒラギノ角ゴシック W4.ttc",
+        // Linux
+        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+        "/usr/share/fonts/noto-cjk/NotoSansCJKjp-Regular.otf",
+        // Windows
+        "C:\\Windows\\Fonts\\YuGothR.ttc",
+        "C:\\Windows\\Fonts\\msgothic.ttc",
+    ];
+
+    for path in &candidates {
+        if let Ok(data) = std::fs::read(path) {
+            let mut fonts = egui::FontDefinitions::default();
+            fonts.font_data.insert(
+                "jp_fallback".to_owned(),
+                egui::FontData::from_owned(data).into(),
+            );
+            // Add as fallback after the default proportional and monospace fonts
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                family.push("jp_fallback".to_owned());
+            }
+            if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                family.push("jp_fallback".to_owned());
+            }
+            ctx.set_fonts(fonts);
+            log::info!("Loaded Japanese font: {}", path);
+            return;
+        }
+    }
+    log::warn!("No Japanese font found on this system");
+}
+
 fn apply_theme(ctx: &egui::Context) {
+    load_japanese_font(ctx);
+
     let mut visuals = egui::Visuals::dark();
 
     visuals.panel_fill = BG_PANEL;
@@ -410,8 +479,69 @@ impl GeoScopeApp {
         let name = path.file_name()
             .map(|n| n.to_string_lossy().to_string())
             .unwrap_or_default();
-        self.ui_state.status_text = format!("Opened: {name}");
+        self.ui_state.status_text = format!("{} {name}", t("opened"));
         Ok(())
+    }
+
+    /// Process pending MCP commands from the TCP listener.
+    fn process_mcp_commands(&mut self) {
+        // Drain up to 8 commands per frame to avoid blocking the GUI
+        for _ in 0..8 {
+            let pending = {
+                let mut q = self.mcp_queue.lock().unwrap();
+                q.pop_front()
+            };
+            let Some(pending) = pending else { break };
+
+            let response = self.handle_mcp_command(&pending.command);
+            let _ = pending.responder.send(response);
+            self.data_generation += 1;
+        }
+    }
+
+    fn handle_mcp_command(&mut self, cmd: &crate::mcp::McpCommand) -> crate::mcp::McpResponse {
+        use crate::mcp::{McpCommand, McpResponse};
+
+        match cmd {
+            McpCommand::GetStatus => {
+                let data = crate::mcp::build_status(&self.ui_state, &self.data_store);
+                McpResponse::ok(data)
+            }
+            McpCommand::OpenFile { path } => {
+                let p = std::path::Path::new(path);
+                match self.open_file(p) {
+                    Ok(()) => McpResponse::ok(serde_json::json!({"opened": path})),
+                    Err(e) => McpResponse::err(e),
+                }
+            }
+            McpCommand::ListVariables => {
+                let data = crate::mcp::build_variable_list(&self.data_store);
+                McpResponse::ok(data)
+            }
+            McpCommand::Play => {
+                self.ui_state.playing = true;
+                McpResponse::ok(serde_json::json!({"playing": true}))
+            }
+            McpCommand::Pause => {
+                self.ui_state.playing = false;
+                McpResponse::ok(serde_json::json!({"playing": false}))
+            }
+            // All Set* and ToggleOverlay commands go through ScriptSettings
+            other => {
+                if let Some(settings) = crate::mcp::build_script_settings(other) {
+                    let changes = crate::codegen::rhai_engine::apply_script_settings(
+                        &settings,
+                        &mut self.ui_state,
+                        &mut self.data_store,
+                    );
+                    McpResponse::ok(serde_json::json!({
+                        "applied": changes,
+                    }))
+                } else {
+                    McpResponse::err("Unknown command")
+                }
+            }
+        }
     }
 }
 
@@ -423,6 +553,7 @@ impl eframe::App for GeoScopeApp {
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         let state = SessionState {
+            lang: self.ui_state.lang,
             file_paths: self.data_store.files.iter().map(|f| f.path.clone()).collect(),
             active_file: self.data_store.active_file,
             selected_variables: self.data_store.files.iter().map(|f| f.selected_variable).collect(),
@@ -465,6 +596,9 @@ impl eframe::App for GeoScopeApp {
             self.theme_applied = true;
         }
 
+        // Process MCP commands
+        self.process_mcp_commands();
+
         // Handle drag & drop
         ctx.input(|i| {
             for file in &i.raw.dropped_files {
@@ -474,11 +608,11 @@ impl eframe::App for GeoScopeApp {
                             let name = path.file_name()
                                 .map(|n| n.to_string_lossy().to_string())
                                 .unwrap_or_default();
-                            self.ui_state.status_text = format!("Opened: {name}");
+                            self.ui_state.status_text = format!("{} {name}", t("opened"));
                         }
                         Err(e) => {
                             log::error!("Failed to open file: {e}");
-                            self.ui_state.status_text = format!("Error: {e}");
+                            self.ui_state.status_text = format!("{} {e}", t("error_prefix"));
                         }
                     }
                 }
@@ -524,6 +658,17 @@ impl eframe::App for GeoScopeApp {
                             ui.label(egui::RichText::new(name).size(12.0).color(TEXT_SECONDARY));
                         }
                     }
+                    // Language toggle (right-aligned)
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let lang = tab_viewer.ui_state.lang;
+                        if ui.add(egui::Button::new(
+                            egui::RichText::new(lang.label()).size(11.0).color(TEXT_SECONDARY)
+                        ).frame(false)).clicked() {
+                            let new_lang = lang.next();
+                            tab_viewer.ui_state.lang = new_lang;
+                            crate::i18n::set_lang(new_lang);
+                        }
+                    });
                 });
             });
 
@@ -534,36 +679,24 @@ impl eframe::App for GeoScopeApp {
             .show(ctx, |ui| {
                 ui.horizontal_centered(|ui| {
                     // Check for error/export status first
-                    let is_special = tab_viewer.ui_state.status_text.starts_with("Error")
+                    let is_special = tab_viewer.ui_state.status_text.starts_with(t("error_prefix"))
                         || tab_viewer.ui_state.status_text.contains("error")
-                        || tab_viewer.ui_state.status_text.starts_with("Exported");
+                        || tab_viewer.ui_state.status_text.contains("エラー")
+                        || tab_viewer.ui_state.status_text.starts_with(t("exported_prefix"));
 
                     if is_special {
-                        let status_color = if tab_viewer.ui_state.status_text.contains("rror") {
+                        let status_color = if tab_viewer.ui_state.status_text.contains("rror")
+                            || tab_viewer.ui_state.status_text.contains("エラー") {
                             ACCENT_ERROR
                         } else {
                             ACCENT_SUCCESS
                         };
                         ui.label(egui::RichText::new(&tab_viewer.ui_state.status_text).size(11.0).color(status_color));
+                    } else if let Some(ref text) = self.cached_inference_text {
+                        ui.label(egui::RichText::new("💡").size(11.0));
+                        ui.label(egui::RichText::new(text).size(11.0).color(TEXT_SECONDARY));
                     } else {
-                        // Show inference-based status
-                        let inference_text = if let Some(fi) = tab_viewer.data_store.active_file {
-                            if let Some(file) = tab_viewer.data_store.files.get(fi) {
-                                if let Some(vi) = file.selected_variable {
-                                    let var = &file.variables[vi];
-                                    let inf = crate::data::inference::infer_variable(var, file.field_data.as_ref());
-                                    let cm = tab_viewer.ui_state.colormap;
-                                    Some(format!("Detected: {} ({}, {})", inf.description, cm.label(), cm.description()))
-                                } else { None }
-                            } else { None }
-                        } else { None };
-
-                        if let Some(text) = inference_text {
-                            ui.label(egui::RichText::new("💡").size(11.0));
-                            ui.label(egui::RichText::new(&text).size(11.0).color(TEXT_SECONDARY));
-                        } else {
-                            ui.label(egui::RichText::new(&tab_viewer.ui_state.status_text).size(11.0).color(TEXT_SECONDARY));
-                        }
+                        ui.label(egui::RichText::new(&tab_viewer.ui_state.status_text).size(11.0).color(TEXT_SECONDARY));
                     }
                 });
             });
@@ -581,11 +714,11 @@ impl eframe::App for GeoScopeApp {
                 .show_animated(ctx, true, |ui| {
                     // Header: Data + open-file button + collapse
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("Data").strong().size(13.0).color(TEXT_HEADING));
+                        ui.label(egui::RichText::new(t("data")).strong().size(13.0).color(TEXT_HEADING));
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(egui::Button::new(
                                 egui::RichText::new("\u{2039}").size(22.0).color(TEXT_SECONDARY)
-                            ).frame(false)).on_hover_text("Hide sidebar [").clicked() {
+                            ).frame(false)).on_hover_text(t("hide_left")).clicked() {
                                 tab_viewer.ui_state.left_panel_open = false;
                             }
                             if ui.button(egui::RichText::new("+").size(14.0)).clicked() {
@@ -611,7 +744,7 @@ impl eframe::App for GeoScopeApp {
                         ui.add_space(4.0);
                         if ui.add(egui::Button::new(
                             egui::RichText::new("\u{203A}").size(22.0).color(TEXT_SECONDARY)
-                        ).frame(false)).on_hover_text("Show Data [").clicked() {
+                        ).frame(false)).on_hover_text(t("show_left")).clicked() {
                             tab_viewer.ui_state.left_panel_open = true;
                         }
                     });
@@ -629,19 +762,19 @@ impl eframe::App for GeoScopeApp {
                 .show_animated(ctx, true, |ui| {
                     // Header: sub-tabs + close button
                     ui.horizontal(|ui| {
-                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 0, "Inspector").clicked() {
+                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 0, t("inspector")).clicked() {
                             tab_viewer.ui_state.right_panel_tab = 0;
                         }
-                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 1, "Code").clicked() {
+                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 1, t("code")).clicked() {
                             tab_viewer.ui_state.right_panel_tab = 1;
                         }
-                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 2, "Copilot").clicked() {
+                        if ui.selectable_label(tab_viewer.ui_state.right_panel_tab == 2, t("copilot")).clicked() {
                             tab_viewer.ui_state.right_panel_tab = 2;
                         }
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui.add(egui::Button::new(
                                 egui::RichText::new("\u{203A}").size(22.0).color(TEXT_SECONDARY)
-                            ).frame(false)).on_hover_text("Hide sidebar ]").clicked() {
+                            ).frame(false)).on_hover_text(t("hide_right")).clicked() {
                                 tab_viewer.ui_state.right_panel_open = false;
                             }
                         });
@@ -664,7 +797,7 @@ impl eframe::App for GeoScopeApp {
                         ui.add_space(4.0);
                         if ui.add(egui::Button::new(
                             egui::RichText::new("\u{2039}").size(22.0).color(TEXT_SECONDARY)
-                        ).frame(false)).on_hover_text("Show Inspector ]").clicked() {
+                        ).frame(false)).on_hover_text(t("show_right")).clicked() {
                             tab_viewer.ui_state.right_panel_open = true;
                         }
                     });
@@ -687,7 +820,7 @@ impl eframe::App for GeoScopeApp {
             }
         });
         if self.ui_state.cmd_palette_open {
-            let screen = ctx.screen_rect();
+            let screen = ctx.content_rect();
             let width = (screen.width() * 0.5).min(500.0);
             let pos = egui::pos2(screen.center().x - width / 2.0, screen.min.y + 100.0);
 
@@ -708,7 +841,7 @@ impl eframe::App for GeoScopeApp {
                 .show(ctx, |ui| {
                     let response = ui.add(
                         egui::TextEdit::singleline(&mut self.ui_state.cmd_palette_input)
-                            .hint_text("Type a command...")
+                            .hint_text(t("cmd_placeholder"))
                             .desired_width(width - 20.0)
                             .font(egui::FontId::proportional(16.0)),
                     );
@@ -739,7 +872,7 @@ impl eframe::App for GeoScopeApp {
 
                     if matches.is_empty() && !self.ui_state.cmd_palette_input.is_empty() {
                         ui.label(
-                            egui::RichText::new("No matching commands").color(TEXT_CAPTION),
+                            egui::RichText::new(t("no_matching_commands")).color(TEXT_CAPTION),
                         );
                     }
 
@@ -756,7 +889,7 @@ impl eframe::App for GeoScopeApp {
             let mut open = true;
             let mut do_export = false;
             let is_gif = self.ui_state.export_settings.format == ExportFormat::Gif;
-            let dialog_title = if is_gif { "Export GIF" } else { "Export PNG" };
+            let dialog_title = if is_gif { t("export_gif") } else { t("export_png") };
             egui::Window::new(dialog_title)
                 .open(&mut open)
                 .collapsible(false)
@@ -767,7 +900,7 @@ impl eframe::App for GeoScopeApp {
 
                     // Format selector
                     ui.horizontal(|ui| {
-                        ui.label("Format:");
+                        ui.label(t("format_label"));
                         ui.selectable_value(
                             &mut self.ui_state.export_settings.format,
                             ExportFormat::Png,
@@ -784,7 +917,7 @@ impl eframe::App for GeoScopeApp {
 
                     // Title
                     ui.horizontal(|ui| {
-                        ui.label("Title:");
+                        ui.label(t("title_label"));
                         ui.text_edit_singleline(&mut self.ui_state.export_settings.title);
                     });
 
@@ -792,7 +925,7 @@ impl eframe::App for GeoScopeApp {
 
                     // Resolution
                     ui.horizontal(|ui| {
-                        ui.label("Resolution:");
+                        ui.label(t("resolution_label"));
                         for s in [1u32, 2, 4] {
                             ui.selectable_value(
                                 &mut self.ui_state.export_settings.scale,
@@ -819,13 +952,13 @@ impl eframe::App for GeoScopeApp {
                     ui.add_space(4.0);
 
                     // Colorbar toggle
-                    ui.checkbox(&mut self.ui_state.export_settings.colorbar, "Include colorbar");
+                    ui.checkbox(&mut self.ui_state.export_settings.colorbar, t("include_colorbar"));
 
                     // Publication quality toggle (PNG only)
                     if self.ui_state.export_settings.format != ExportFormat::Gif {
                         ui.checkbox(
                             &mut self.ui_state.export_settings.publication,
-                            "Publication quality",
+                            t("publication_quality"),
                         );
                     }
 
@@ -833,7 +966,7 @@ impl eframe::App for GeoScopeApp {
                     if self.ui_state.export_settings.format == ExportFormat::Gif {
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            ui.label("FPS:");
+                            ui.label(t("fps_label"));
                             ui.add(egui::Slider::new(&mut self.ui_state.export_settings.gif_fps, 1..=30));
                         });
 
@@ -841,7 +974,7 @@ impl eframe::App for GeoScopeApp {
                         if let Some(file_idx) = self.data_store.active_file {
                             if let Some(n) = self.data_store.files[file_idx].time_steps {
                                 ui.label(
-                                    egui::RichText::new(format!("  {} frames", n))
+                                    egui::RichText::new(format!("  {} {}", n, t("frames")))
                                         .size(10.0)
                                         .color(egui::Color32::from_gray(120)),
                                 );
@@ -884,9 +1017,9 @@ impl eframe::App for GeoScopeApp {
 
                     // Export button
                     let btn_label = if self.ui_state.export_settings.format == ExportFormat::Gif {
-                        "Save GIF"
+                        t("save_gif")
                     } else {
-                        "Save PNG"
+                        t("save_png")
                     };
                     if ui.add(egui::Button::new(
                         egui::RichText::new(btn_label).color(egui::Color32::WHITE).size(12.0)
@@ -943,14 +1076,15 @@ impl eframe::App for GeoScopeApp {
                                     Ok(()) => {
                                         let s = self.ui_state.export_settings.scale;
                                         self.ui_state.status_text = format!(
-                                            "Exported {}x: {}",
+                                            "{} {}x: {}",
+                                            t("exported_prefix"),
                                             s,
                                             path.display()
                                         );
                                         self.ui_state.export_dialog_open = false;
                                     }
                                     Err(e) => {
-                                        self.ui_state.status_text = format!("Export error: {e}");
+                                        self.ui_state.status_text = format!("{} {e}", t("export_error"));
                                     }
                                 }
                             }
@@ -965,7 +1099,7 @@ impl eframe::App for GeoScopeApp {
                                     .set_file_name(&default_name)
                                     .save_file()
                                 {
-                                    self.ui_state.status_text = "Exporting GIF...".to_string();
+                                    self.ui_state.status_text = t("exporting_gif").to_string();
                                     let level_idx = self.ui_state.level_index;
                                     let settings = self.ui_state.export_settings.clone();
                                     let colormap = self.ui_state.colormap;
@@ -989,14 +1123,16 @@ impl eframe::App for GeoScopeApp {
                                     ) {
                                         Ok(n_frames) => {
                                             self.ui_state.status_text = format!(
-                                                "Exported GIF ({} frames): {}",
+                                                "{} ({} {}): {}",
+                                                t("exported_prefix"),
                                                 n_frames,
+                                                t("frames"),
                                                 path.display()
                                             );
                                             self.ui_state.export_dialog_open = false;
                                         }
                                         Err(e) => {
-                                            self.ui_state.status_text = format!("GIF export error: {e}");
+                                            self.ui_state.status_text = format!("{} {e}", t("gif_export_error"));
                                         }
                                     }
                                 }
@@ -1012,7 +1148,7 @@ impl eframe::App for GeoScopeApp {
             let paths: Vec<_> = std::mem::take(&mut self.open_file_request);
             for path in &paths {
                 if let Err(e) = self.open_file(path) {
-                    self.ui_state.status_text = format!("Error: {e}");
+                    self.ui_state.status_text = format!("{} {e}", t("error_prefix"));
                 }
             }
         }
@@ -1027,9 +1163,9 @@ impl eframe::App for GeoScopeApp {
                 &mut self.data_store,
             );
             if changes.is_empty() {
-                self.ui_state.code_panel_status = "No changes detected".to_string();
+                self.ui_state.code_panel_status = t("no_changes").to_string();
             } else {
-                self.ui_state.code_panel_status = format!("Applied: {}", changes.join(", "));
+                self.ui_state.code_panel_status = format!("{} {}", t("applied"), changes.join(", "));
                 self.data_generation += 1;
             }
         }
@@ -1045,17 +1181,23 @@ impl eframe::App for GeoScopeApp {
                         &mut self.data_store,
                     );
                     if changes.is_empty() {
-                        self.ui_state.rhai_status = "No changes detected".to_string();
+                        self.ui_state.rhai_status = t("no_changes").to_string();
                     } else {
                         self.ui_state.rhai_status =
-                            format!("Applied: {}", changes.join(", "));
+                            format!("{} {}", t("applied"), changes.join(", "));
                         self.data_generation += 1;
                     }
                 }
                 Err(e) => {
-                    self.ui_state.rhai_status = format!("Error: {}", e);
+                    self.ui_state.rhai_status = format!("{} {}", t("error_prefix"), e);
                 }
             }
+        }
+
+        // Apply API key from UI input
+        if self.ui_state.copilot_api_key_set && !self.ui_state.copilot_api_key_input.is_empty() {
+            self.llm_client.set_api_key(&self.ui_state.copilot_api_key_input);
+            self.ui_state.copilot_api_key_input.clear(); // Don't keep key in UI state
         }
 
         // Handle Copilot submit request
@@ -1121,6 +1263,25 @@ impl eframe::App for GeoScopeApp {
         if self.ui_state.colormap != self.last_colormap {
             self.last_colormap = self.ui_state.colormap;
             self.data_generation += 1;
+            // Refresh inference text with new colormap name
+            self.cached_inference_key = None;
+        }
+
+        // Update cached inference text when variable changes
+        {
+            let current_key = self.data_store.active_file.and_then(|fi| {
+                self.data_store.files.get(fi).and_then(|f| f.selected_variable.map(|vi| (fi, vi)))
+            });
+            if current_key != self.cached_inference_key {
+                self.cached_inference_key = current_key;
+                self.cached_inference_text = current_key.and_then(|(fi, vi)| {
+                    let file = self.data_store.files.get(fi)?;
+                    let var = &file.variables[vi];
+                    let inf = crate::data::inference::infer_variable(var, file.field_data.as_ref());
+                    let cm = self.ui_state.colormap;
+                    Some(format!("{} {} ({}, {})", t("detected"), inf.description, cm.label(), cm.description()))
+                });
+            }
         }
 
         // Upload field data to GPU when it changes
@@ -1269,6 +1430,28 @@ impl eframe::App for GeoScopeApp {
             self.hovmoller_generation = self.data_generation;
         }
 
+        // Lazy spectrum data loading — compute E(n) from current field
+        if self.ui_state.view_mode == crate::ui::ViewMode::Spectrum
+            && self.spectrum_generation != self.data_generation
+        {
+            if let Some(file_idx) = self.data_store.active_file {
+                if let Some(file) = self.data_store.files.get(file_idx) {
+                    // Reset sticky Y-range when variable changes
+                    let var_key = file.selected_variable.map(|vi| (file_idx, vi));
+                    if var_key != self.spectrum_var {
+                        self.spectrum_renderer.reset_range();
+                        self.spectrum_var = var_key;
+                    }
+                    if let Some(ref field) = file.field_data {
+                        if let Some(spec_data) = compute_spectrum(field) {
+                            self.spectrum_renderer.set_data(spec_data);
+                        }
+                    }
+                }
+            }
+            self.spectrum_generation = self.data_generation;
+        }
+
         // Lazy cross-section data loading
         if self.ui_state.view_mode == crate::ui::ViewMode::CrossSection
             && self.cross_section_generation != self.data_generation
@@ -1344,7 +1527,7 @@ impl eframe::App for GeoScopeApp {
             || self.ui_state.profile_mode != self.last_profile_mode
             || current_var != self.last_profile_var;
         let profile_stale = self.profile_generation != self.data_generation;
-        if need_profile && (profile_input_changed || (profile_stale && !self.ui_state.playing)) {
+        if need_profile && (profile_input_changed || profile_stale) {
             self.last_profile_point = self.ui_state.profile_point;
             self.last_profile_mode = self.ui_state.profile_mode;
             self.last_profile_var = current_var;
@@ -1576,5 +1759,129 @@ impl eframe::App for GeoScopeApp {
             self.trajectory_overlay.set_current_time(self.ui_state.time_index);
             self.trajectory_overlay.set_trail_length(self.ui_state.trajectory_trail_length);
         }
+    }
+}
+
+/// Compute E(n) and E(m) energy spectra from a 2D field via spherical harmonic transform.
+fn compute_spectrum(field: &crate::data::FieldData) -> Option<crate::renderer::spectrum::SpectrumData> {
+    let n_lon = field.width;
+    let n_lat = field.height;
+    let n_trunc = crate::data::spectral_filter::detect_n_trunc(n_lon, n_lat)?;
+
+    let sphere = ispack_rs::Sphere::gaussian(n_trunc, n_lon, n_lat);
+
+    let mut data_f64 = Vec::with_capacity(n_lon * n_lat);
+    for j in 0..n_lat {
+        let row_start = j * n_lon;
+        for i in 0..n_lon {
+            data_f64.push(field.values[row_start + i] as f64);
+        }
+    }
+
+    let grid_field = sphere.grid_from_data(data_f64);
+    let spec_field = grid_field.to_spectral();
+
+    // E(n): sum over m for each total wavenumber n
+    let mut energy_n = vec![0.0f64; n_trunc + 1];
+    // E(m): sum over n for each zonal wavenumber m
+    let mut energy_m = vec![0.0f64; n_trunc + 1];
+
+    for n in 0..=n_trunc {
+        for m in 0..=n {
+            let c = spec_field.coefficient(n, m);
+            let e = c.norm_sqr();
+            let weighted = if m == 0 { e } else { 2.0 * e };
+            energy_n[n] += weighted;
+            energy_m[m] += weighted;
+        }
+    }
+
+    Some(crate::renderer::spectrum::SpectrumData {
+        energy_n,
+        energy_m,
+        n_trunc,
+        m_trunc: n_trunc,
+    })
+}
+
+#[cfg(test)]
+mod spectrum_tests {
+    #[test]
+    fn test_em_pure_m4() {
+        let n_trunc = 42;
+        let n_lon = 128;
+        let n_lat = 64;
+        let sphere = ispack_rs::Sphere::gaussian(n_trunc, n_lon, n_lat);
+
+        // Pure m=4 field
+        let field = sphere.from_fn(|lon, lat| {
+            (4.0 * lon).cos() * lat.cos().powi(4) * lat.sin()
+        });
+        let spec = field.to_spectral();
+
+        let mut em = vec![0.0f64; n_trunc + 1];
+        for n in 0..=n_trunc {
+            for m in 0..=n {
+                let c = spec.coefficient(n, m);
+                let e = c.norm_sqr();
+                let w = if m == 0 { e } else { 2.0 * e };
+                em[m] += w;
+            }
+        }
+
+        println!("E(m) for pure m=4:");
+        for m in 0..10 {
+            println!("  m={}: {:.6e}", m, em[m]);
+        }
+
+        // m=4 should dominate
+        let max_m = em.iter().enumerate().skip(1)
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap().0;
+        assert_eq!(max_m, 4, "Expected peak at m=4, got m={}", max_m);
+    }
+
+    #[test]
+    fn test_em_from_netcdf() {
+        // Read actual rossby_haurwitz data and check E(m)
+        let path = "samples/rossby_haurwitz.nc";
+        if !std::path::Path::new(path).exists() {
+            println!("Skipping: {path} not found");
+            return;
+        }
+        let file = netcdf::open(path).unwrap();
+        let var = file.variable("vort").unwrap();
+        let data: Vec<f32> = var.get_values::<f32, _>([0..1, 0..64, 0..128]).unwrap();
+
+        let n_lon = 128;
+        let n_lat = 64;
+        let n_trunc = 42;
+        let sphere = ispack_rs::Sphere::gaussian(n_trunc, n_lon, n_lat);
+
+        // field.values layout: [lat][lon], same as compute_spectrum
+        let data_f64: Vec<f64> = data.iter().map(|&v| v as f64).collect();
+        let grid = sphere.grid_from_data(data_f64);
+        let spec = grid.to_spectral();
+
+        let mut em = vec![0.0f64; n_trunc + 1];
+        for n in 0..=n_trunc {
+            for m in 0..=n {
+                let c = spec.coefficient(n, m);
+                let e = c.norm_sqr();
+                let w = if m == 0 { e } else { 2.0 * e };
+                em[m] += w;
+            }
+        }
+
+        println!("E(m) from rossby_haurwitz.nc vort t=0:");
+        for m in 0..10 {
+            println!("  m={}: {:.6e}", m, em[m]);
+        }
+
+        let max_m = em.iter().enumerate().skip(1)
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap().0;
+        println!("Peak at m={} (E={:.6e})", max_m, em[max_m]);
+        assert_eq!(max_m, 4, "Expected peak at m=4, got m={}", max_m);
     }
 }
