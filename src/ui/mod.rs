@@ -2379,7 +2379,7 @@ impl GeoScopeTabViewer<'_> {
                                     egui::Color32::from_rgb(180, 160, 255)
                                 }),
                         );
-                        ui.label(content.as_str());
+                        render_markdown(ui, content, is_user);
                     });
                 }
                 if self.ui_state.copilot_loading {
@@ -2461,5 +2461,169 @@ impl GeoScopeTabViewer<'_> {
                 exact.iter().any(|&c| c == lower) || contains.iter().any(|&c| lower.contains(c))
             })
             .map(|(name, size)| (name.clone(), *size))
+    }
+}
+
+/// Render markdown-formatted text in egui with basic styling.
+/// Supports: headings (##, ###), bold (**text**), bullet lists (- item),
+/// fenced code blocks (```...```), inline code (`code`), and paragraphs.
+fn render_markdown(ui: &mut egui::Ui, content: &str, _is_user: bool) {
+    let mut lines = content.lines().peekable();
+    let code_bg = egui::Color32::from_rgb(30, 30, 40);
+    let code_fg = egui::Color32::from_rgb(200, 220, 180);
+    let text_color = egui::Color32::from_rgb(220, 220, 220);
+    let heading_color = egui::Color32::from_rgb(255, 255, 255);
+    let bullet_color = egui::Color32::from_rgb(100, 200, 180);
+
+    while let Some(line) = lines.next() {
+        // Fenced code block
+        if line.trim_start().starts_with("```") {
+            let mut code_lines = Vec::new();
+            for inner in lines.by_ref() {
+                if inner.trim_start().starts_with("```") {
+                    break;
+                }
+                code_lines.push(inner);
+            }
+            let code_text = code_lines.join("\n");
+            egui::Frame::NONE
+                .fill(code_bg)
+                .corner_radius(4.0)
+                .inner_margin(egui::Margin::same(6))
+                .show(ui, |ui| {
+                    ui.label(
+                        egui::RichText::new(&code_text)
+                            .monospace()
+                            .size(12.0)
+                            .color(code_fg),
+                    );
+                });
+            ui.add_space(2.0);
+            continue;
+        }
+
+        let trimmed = line.trim_start();
+
+        // Empty line → small space
+        if trimmed.is_empty() {
+            ui.add_space(4.0);
+            continue;
+        }
+
+        // Headings
+        if trimmed.starts_with("### ") {
+            ui.label(
+                egui::RichText::new(&trimmed[4..])
+                    .strong()
+                    .size(13.0)
+                    .color(heading_color),
+            );
+            continue;
+        }
+        if trimmed.starts_with("## ") {
+            ui.label(
+                egui::RichText::new(&trimmed[3..])
+                    .strong()
+                    .size(14.0)
+                    .color(heading_color),
+            );
+            continue;
+        }
+        if trimmed.starts_with("# ") {
+            ui.label(
+                egui::RichText::new(&trimmed[2..])
+                    .strong()
+                    .size(15.0)
+                    .color(heading_color),
+            );
+            continue;
+        }
+
+        // Bullet list
+        if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new("  •").color(bullet_color).size(13.0));
+                render_inline_markdown(ui, &trimmed[2..], text_color, code_bg, code_fg);
+            });
+            continue;
+        }
+
+        // Regular paragraph with inline formatting
+        ui.horizontal_wrapped(|ui| {
+            render_inline_markdown(ui, trimmed, text_color, code_bg, code_fg);
+        });
+    }
+}
+
+/// Render a single line of text with inline markdown: **bold** and `code`.
+fn render_inline_markdown(
+    ui: &mut egui::Ui,
+    text: &str,
+    text_color: egui::Color32,
+    code_bg: egui::Color32,
+    code_fg: egui::Color32,
+) {
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        // Find the next special marker
+        let bold_pos = remaining.find("**");
+        let code_pos = remaining.find('`');
+
+        let next = match (bold_pos, code_pos) {
+            (Some(b), Some(c)) => {
+                if b <= c { Some(("**", b)) } else { Some(("`", c)) }
+            }
+            (Some(b), None) => Some(("**", b)),
+            (None, Some(c)) => Some(("`", c)),
+            (None, None) => None,
+        };
+
+        match next {
+            None => {
+                // Plain text to end
+                ui.label(egui::RichText::new(remaining).color(text_color));
+                break;
+            }
+            Some((marker, pos)) => {
+                // Emit plain text before marker
+                if pos > 0 {
+                    ui.label(egui::RichText::new(&remaining[..pos]).color(text_color));
+                }
+                let after = &remaining[pos + marker.len()..];
+                if marker == "**" {
+                    if let Some(end) = after.find("**") {
+                        ui.label(
+                            egui::RichText::new(&after[..end])
+                                .strong()
+                                .color(text_color),
+                        );
+                        remaining = &after[end + 2..];
+                    } else {
+                        ui.label(egui::RichText::new(&remaining[pos..]).color(text_color));
+                        break;
+                    }
+                } else {
+                    // inline code
+                    if let Some(end) = after.find('`') {
+                        egui::Frame::NONE
+                            .fill(code_bg)
+                            .corner_radius(2.0)
+                            .inner_margin(egui::Margin::symmetric(3, 1))
+                            .show(ui, |ui| {
+                                ui.label(
+                                    egui::RichText::new(&after[..end])
+                                        .monospace()
+                                        .size(12.0)
+                                        .color(code_fg),
+                                );
+                            });
+                        remaining = &after[end + 1..];
+                    } else {
+                        ui.label(egui::RichText::new(&remaining[pos..]).color(text_color));
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
