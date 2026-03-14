@@ -5,7 +5,7 @@
 <p align="center"><strong>Open. See. Explore.</strong> — GFD Data Visualization, Reimagined.</p>
 
 <p align="center">
-<img src="https://img.shields.io/badge/status-v0.5%20beta-2AA198" alt="Status">
+<img src="https://img.shields.io/badge/status-v0.6%20beta-2AA198" alt="Status">
 <img src="https://img.shields.io/badge/language-Rust-orange" alt="Language">
 <img src="https://img.shields.io/badge/license-MIT-blue" alt="License">
 </p>
@@ -28,7 +28,7 @@ Built as a modern replacement for GrADS / Panoply / ncview.
 | **Hovmoller** | Time-longitude heatmap diagram |
 | **Cross-Section** | Vertical slice heatmap (Fix Lat / Fix Lon) |
 | **Profile** | 1D line graph — vertical profile or time series with hover crosshair |
-| **E(n) Spectrum** | Log-log energy spectrum plot |
+| **Spectrum** | E(n) total wavenumber, E(m) zonal wavenumber bar chart, E(ω) temporal frequency spectrum |
 
 ### Overlays
 
@@ -60,15 +60,18 @@ Built as a modern replacement for GrADS / Panoply / ncview.
 - **Code Generation** — Bidirectional Python (xarray + cartopy + matplotlib) code panel
 - **Rhai Scripting** — Programmable automation via Rhai script engine
 - **Spectral Filter** — Wavenumber truncation filter (ispack-rs integration)
+- **Temporal Filter** — Time-domain lowpass filter for smoothing time series (FFT-based)
 - **Context Menu** — Right-click Globe/Map for Profile here / Export PNG / Center here
 - **Collapsible Panels** — `[`/`]` keys to toggle Data Browser / Inspector
 - **Session Persistence** — Auto-save/restore app state across sessions
 
 ### AI & Automation
 
-- **LLM Copilot** — Chat sidebar with Claude API (Explain / Explore quick actions)
+- **LLM Copilot** — Chat sidebar with Claude API (Explain / Explore quick actions, markdown rendering)
 - **Command Palette** — `Cmd+K` fuzzy search for views, colormaps, projections, overlays, exports
 - **Recipe Save/Load** — Save visualization settings as .py recipes, load & apply
+- **MCP Server** — Machine-readable control interface for external tool integration
+- **i18n** — English / Japanese UI switching
 
 ### 10 Colormaps
 
@@ -155,6 +158,7 @@ src/
 │   ├── mod.rs              # DataStore, NetCDF I/O, field/profile/trajectory loading
 │   ├── inference.rs        # 3-stage variable inference + visualization suggestion
 │   ├── spectral_filter.rs  # Wavenumber filter (ispack-rs, spectral truncation)
+│   ├── temporal_filter.rs  # Temporal FFT spectrum + lowpass filter (ispack-rs RealFftPlan)
 │   └── trajectory_loader.rs # External trajectory loading (JSON/CSV)
 ├── renderer/
 │   ├── common.rs           # Shared types, view_proj matrix, colormap LUT
@@ -162,7 +166,7 @@ src/
 │   ├── map.rs              # 2D map (wgpu, Equirect/Mollweide/Polar)
 │   ├── hovmoller.rs        # Hovmoller diagram (egui)
 │   ├── cross_section.rs    # Vertical cross-section (egui)
-│   ├── spectrum.rs         # E(n) energy spectrum (egui)
+│   ├── spectrum.rs         # E(n)/E(m)/E(ω) energy spectrum (egui)
 │   ├── profile.rs          # 1D profile / time series (egui)
 │   ├── contour.rs          # Contour lines — Marching Squares (egui)
 │   ├── streamline.rs       # Streamlines — RK4 integration (egui)
@@ -180,6 +184,9 @@ src/
 │   ├── parser.rs           # Python → GUI reverse parser (bidirectional sync)
 │   ├── rhai_engine.rs      # Rhai script engine (GeoScope API)
 │   └── cmd_palette.rs      # Command palette (fuzzy match + action execution)
+├── mcp/
+│   └── mod.rs              # MCP server (JSON-RPC, tool control interface)
+├── i18n.rs                 # Internationalization (EN/JA, t("key") lookup)
 └── ui/mod.rs               # UI panels (DataBrowser, Viewport, Inspector, CodePanel, Copilot)
 ```
 
@@ -191,7 +198,8 @@ src/
 | v0.2 | Mollweide + Cross-Section + Vector Overlay + Level/Range control | Done |
 | v0.3 | Point Info + Profile + Contour + Streamline + Polar Stereo + GIF Export + Spectral Filter | Done |
 | v0.4 | Visualization Suggestion + Trajectory + Code Panel + Rhai Scripting + Recipe Save/Load | Done |
-| **v0.5** | **LLM Copilot + Command Palette** | **Done (current)** |
+| v0.5 | LLM Copilot + Command Palette | Done |
+| **v0.6** | **i18n + MCP + E(m) bar chart + E(ω) temporal spectrum + temporal filter + Copilot markdown** | **Done (current)** |
 | Future | WebAssembly + WebGPU browser version | Planned |
 
 ## Relationship to dcmodel
