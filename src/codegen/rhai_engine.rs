@@ -185,7 +185,9 @@ pub fn apply_script_settings(
                 if let Some(idx) = file.variables.iter().position(|v| v.name == *var_name) {
                     if file.selected_variable != Some(idx) {
                         file.selected_variable = Some(idx);
-                        let _ = data_store.load_field(fi, idx);
+                        let _ = data_store.load_field_at(
+                            fi, idx, ui_state.time_index, ui_state.level_index,
+                        );
                         changes.push(format!("variable={}", var_name));
                     }
                 }
@@ -208,6 +210,19 @@ pub fn apply_script_settings(
         if ui_state.level_index != l {
             ui_state.level_index = l;
             changes.push(format!("level={}", l));
+        }
+    }
+
+    // Reload field data if time or level changed
+    if settings.time_index.is_some() || settings.level_index.is_some() {
+        if let Some(fi) = data_store.active_file {
+            if let Some(file) = data_store.files.get(fi) {
+                if let Some(vi) = file.selected_variable {
+                    let _ = data_store.load_field_at(
+                        fi, vi, ui_state.time_index, ui_state.level_index,
+                    );
+                }
+            }
         }
     }
 
