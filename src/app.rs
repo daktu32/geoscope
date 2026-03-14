@@ -137,6 +137,10 @@ pub struct GeoScopeApp {
     open_file_request: Vec<std::path::PathBuf>,
     /// Variable key used for spectrum Y-axis envelope; reset on change.
     spectrum_var: Option<(usize, usize)>,
+    /// Temporal spectrum generation counter (separate from spatial spectrum).
+    temporal_spectrum_generation: u64,
+    /// Last profile_point used for temporal spectrum computation.
+    last_temporal_point: Option<(usize, usize)>,
     /// Cached global (min, max) for the current variable. Reset on variable change.
     global_range_cache: Option<(f32, f32)>,
     /// Variable index used to compute the cached global range.
@@ -282,6 +286,8 @@ impl GeoScopeApp {
             last_map_projection: crate::renderer::map::MapProjection::default(),
             open_file_request: Vec::new(),
             spectrum_var: None,
+            temporal_spectrum_generation: 0,
+            last_temporal_point: None,
             global_range_cache: None,
             global_range_var: None,
             theme_applied: false,
@@ -1452,6 +1458,42 @@ impl eframe::App for GeoScopeApp {
             self.spectrum_generation = self.data_generation;
         }
 
+        // Lazy temporal spectrum loading — compute E(ω) from time series at profile_point
+        if self.ui_state.view_mode == crate::ui::ViewMode::Spectrum
+            && self.ui_state.spectrum_mode == crate::ui::SpectrumMode::TemporalFrequency
+        {
+            let needs_reload = self.temporal_spectrum_generation != self.data_generation
+                || self.last_temporal_point != self.ui_state.profile_point;
+            if needs_reload {
+                if let (Some(file_idx), Some((lon_idx, lat_idx))) =
+                    (self.data_store.active_file, self.ui_state.profile_point)
+                {
+                    if let Some(file) = self.data_store.files.get(file_idx) {
+                        if let Some(var_idx) = file.selected_variable {
+                            let level_idx = self.ui_state.level_index;
+                            if let Some(ts) = self.data_store.load_time_series_data(
+                                file_idx, var_idx, level_idx, lon_idx, lat_idx,
+                            ) {
+                                if let Some(spec_data) = crate::data::temporal_filter::compute_temporal_spectrum(
+                                    &ts.values, &ts.axis_values,
+                                ) {
+                                    self.ui_state.temporal_filter_n_freq = spec_data.n_freq;
+                                    if self.ui_state.temporal_filter_cutoff == 0
+                                        || self.ui_state.temporal_filter_cutoff > spec_data.n_freq
+                                    {
+                                        self.ui_state.temporal_filter_cutoff = spec_data.n_freq;
+                                    }
+                                    self.spectrum_renderer.set_temporal_data(spec_data);
+                                }
+                            }
+                        }
+                    }
+                }
+                self.temporal_spectrum_generation = self.data_generation;
+                self.last_temporal_point = self.ui_state.profile_point;
+            }
+        }
+
         // Lazy cross-section data loading
         if self.ui_state.view_mode == crate::ui::ViewMode::CrossSection
             && self.cross_section_generation != self.data_generation
@@ -1590,9 +1632,21 @@ impl eframe::App for GeoScopeApp {
                                 crate::ui::ProfileMode::TimeSeries => {
                                     self.profile_renderer.clear_heatmap();
                                     let level_idx = self.ui_state.level_index;
-                                    if let Some(ts) = self.data_store.load_time_series_data(
+                                    if let Some(mut ts) = self.data_store.load_time_series_data(
                                         file_idx, var_idx, level_idx, lon_idx, lat_idx,
                                     ) {
+                                        // Apply temporal lowpass filter if enabled
+                                        if self.ui_state.temporal_filter_enabled && self.ui_state.temporal_filter_cutoff > 0 {
+                                            if let Some(filtered) = crate::data::temporal_filter::temporal_lowpass_filter(
+                                                &ts.values, self.ui_state.temporal_filter_cutoff,
+                                            ) {
+                                                let min = filtered.iter().copied().fold(f32::INFINITY, f32::min);
+                                                let max = filtered.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                                                ts.values = filtered;
+                                                ts.min = min;
+                                                ts.max = max;
+                                            }
+                                        }
                                         self.profile_is_time_series = true;
                                         let var_name = file.variables[var_idx].name.clone();
                                         self.profile_renderer.set_title(format!(

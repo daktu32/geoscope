@@ -42,6 +42,8 @@ pub enum SpectrumMode {
     TotalWavenumber,
     /// E(m): zonal wavenumber spectrum (sum over all n for each m)
     ZonalWavenumber,
+    /// E(ω): temporal frequency spectrum
+    TemporalFrequency,
 }
 
 /// Profile view mode.
@@ -178,6 +180,10 @@ pub struct UiState {
     pub wavenumber_filter_enabled: bool,
     pub wavenumber_cutoff: usize,
     pub wavenumber_n_max: usize,
+    // Temporal filter
+    pub temporal_filter_enabled: bool,
+    pub temporal_filter_cutoff: usize,
+    pub temporal_filter_n_freq: usize,
     // Visualization suggestion
     #[allow(dead_code)]
     pub suggestion: Option<crate::data::inference::VisualizationSuggestion>,
@@ -271,6 +277,9 @@ impl Default for UiState {
             wavenumber_filter_enabled: false,
             wavenumber_cutoff: 0,
             wavenumber_n_max: 0,
+            temporal_filter_enabled: false,
+            temporal_filter_cutoff: 0,
+            temporal_filter_n_freq: 0,
             suggestion: None,
             suggestion_dismissed: false,
             left_panel_open: true,
@@ -1078,10 +1087,21 @@ impl GeoScopeTabViewer<'_> {
                         self.ui_state.spectrum_mode = SpectrumMode::ZonalWavenumber;
                         *self.data_generation += 1;
                     }
+                    let ew_active = self.ui_state.spectrum_mode == SpectrumMode::TemporalFrequency;
+                    let ew_text = egui::RichText::new("E(ω)").size(11.0).color(
+                        if ew_active { crate::app::TEXT_HEADING } else { crate::app::TEXT_CAPTION }
+                    );
+                    if ui.add(egui::Button::new(ew_text).fill(
+                        if ew_active { crate::app::BG_WIDGET } else { egui::Color32::TRANSPARENT }
+                    ).corner_radius(3.0)).clicked() && !ew_active {
+                        self.ui_state.spectrum_mode = SpectrumMode::TemporalFrequency;
+                        *self.data_generation += 1;
+                    }
                 });
                 let display_mode = match self.ui_state.spectrum_mode {
                     SpectrumMode::TotalWavenumber => crate::renderer::spectrum::SpectrumDisplayMode::TotalWavenumber,
                     SpectrumMode::ZonalWavenumber => crate::renderer::spectrum::SpectrumDisplayMode::ZonalWavenumber,
+                    SpectrumMode::TemporalFrequency => crate::renderer::spectrum::SpectrumDisplayMode::TemporalFrequency,
                 };
                 self.spectrum_renderer.paint(&mut child_ui, display_mode);
             }
@@ -1750,6 +1770,24 @@ impl GeoScopeTabViewer<'_> {
                                                 .size(10.0)
                                                 .color(crate::app::TEXT_CAPTION),
                                         );
+                                    }
+                                    // --- Temporal Filter (only when profile_point is set) ---
+                                    if self.ui_state.profile_point.is_some() && self.ui_state.temporal_filter_n_freq > 0 {
+                                        ui.separator();
+                                        if ui.checkbox(&mut self.ui_state.temporal_filter_enabled, egui::RichText::new(t("temporal_filter")).size(11.0)).changed() {
+                                            *self.data_generation += 1;
+                                        }
+                                        if self.ui_state.temporal_filter_enabled {
+                                            let n_freq = self.ui_state.temporal_filter_n_freq;
+                                            let mut cutoff = self.ui_state.temporal_filter_cutoff;
+                                            let label = format!("k={}", cutoff);
+                                            let slider = egui::Slider::new(&mut cutoff, 1..=n_freq)
+                                                .text(label);
+                                            if ui.add(slider).changed() {
+                                                self.ui_state.temporal_filter_cutoff = cutoff;
+                                                *self.data_generation += 1;
+                                            }
+                                        }
                                     }
                                 });
                         }

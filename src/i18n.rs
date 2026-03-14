@@ -148,6 +148,8 @@ fn en_translations() -> HashMap<&'static str, &'static str> {
 
         // --- Checkboxes ---
         "wavenumber_filter" => "Wavenumber Filter",
+        "temporal_filter" => "Temporal Filter",
+        "click_for_spectrum" => "Click a point on Globe/Map",
         "include_colorbar" => "Include colorbar",
         "publication_quality" => "Publication quality",
         "symmetric_centered" => "Symmetric (0-centered)",
@@ -293,6 +295,8 @@ fn ja_translations() -> HashMap<&'static str, &'static str> {
 
         // --- Checkboxes ---
         "wavenumber_filter" => "波数フィルタ",
+        "temporal_filter" => "時間フィルタ",
+        "click_for_spectrum" => "Globe/Mapで点をクリック",
         "include_colorbar" => "カラーバーを含む",
         "publication_quality" => "論文品質",
         "symmetric_centered" => "対称 (0中心)",

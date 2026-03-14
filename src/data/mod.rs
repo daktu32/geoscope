@@ -2,6 +2,7 @@ use std::path::Path;
 
 pub mod inference;
 pub mod spectral_filter;
+pub mod temporal_filter;
 pub mod trajectory_loader;
 
 /// Metadata for a single variable in a NetCDF file.

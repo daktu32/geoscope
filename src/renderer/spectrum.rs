@@ -14,8 +14,9 @@ pub struct SpectrumData {
 /// Which spectrum to display.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum SpectrumDisplayMode {
-    TotalWavenumber, // E(n)
-    ZonalWavenumber, // E(m)
+    TotalWavenumber,    // E(n)
+    ZonalWavenumber,    // E(m)
+    TemporalFrequency,  // E(ω)
 }
 
 /// Renders spectrum plots.
@@ -31,6 +32,9 @@ pub struct SpectrumRenderer {
     /// Accumulated Y-axis envelope per mode (log10 scale)
     y_envelope_n: Option<(f64, f64)>,
     y_envelope_m: Option<(f64, f64)>,
+    /// Temporal spectrum data (E(ω))
+    pub temporal_data: Option<crate::data::temporal_filter::TemporalSpectrumData>,
+    y_envelope_omega: Option<(f64, f64)>,
 }
 
 impl SpectrumRenderer {
@@ -39,6 +43,8 @@ impl SpectrumRenderer {
             data: None,
             y_envelope_n: None,
             y_envelope_m: None,
+            temporal_data: None,
+            y_envelope_omega: None,
         }
     }
 
@@ -67,10 +73,18 @@ impl SpectrumRenderer {
         }
     }
 
+    /// Set temporal spectrum data for E(ω) display.
+    pub fn set_temporal_data(&mut self, data: crate::data::temporal_filter::TemporalSpectrumData) {
+        Self::expand_envelope(&mut self.y_envelope_omega, &data.energy);
+        self.temporal_data = Some(data);
+    }
+
     /// Reset the sticky Y-axis range (call when variable changes).
     pub fn reset_range(&mut self) {
         self.y_envelope_n = None;
         self.y_envelope_m = None;
+        self.y_envelope_omega = None;
+        self.temporal_data = None;
     }
 
     /// Draw the spectrum plot for the given mode.
@@ -78,6 +92,7 @@ impl SpectrumRenderer {
         match mode {
             SpectrumDisplayMode::TotalWavenumber => self.paint_loglog(ui, mode),
             SpectrumDisplayMode::ZonalWavenumber => self.paint_bar(ui),
+            SpectrumDisplayMode::TemporalFrequency => self.paint_temporal(ui),
         }
     }
 
@@ -96,10 +111,12 @@ impl SpectrumRenderer {
         let (energy, y_envelope, x_label) = match mode {
             SpectrumDisplayMode::TotalWavenumber => (&data.energy_n, &self.y_envelope_n, "n"),
             SpectrumDisplayMode::ZonalWavenumber => (&data.energy_m, &self.y_envelope_m, "m"),
+            SpectrumDisplayMode::TemporalFrequency => unreachable!(),
         };
         let y_label = match mode {
             SpectrumDisplayMode::TotalWavenumber => "E(n)",
             SpectrumDisplayMode::ZonalWavenumber => "E(m)",
+            SpectrumDisplayMode::TemporalFrequency => unreachable!(),
         };
 
         // Collect plottable points: skip index 0, E<=0, and machine-precision noise
@@ -515,6 +532,187 @@ impl SpectrumRenderer {
 
         // --- Axis labels ---
         Self::draw_axis_labels(painter, &available, &plot_rect, "m", "E(m)", label_color);
+
+        // Border
+        painter.rect_stroke(
+            plot_rect,
+            0.0,
+            egui::Stroke::new(1.0, egui::Color32::from_gray(80)),
+            egui::epaint::StrokeKind::Outside,
+        );
+
+        ui.allocate_rect(available, egui::Sense::hover());
+    }
+
+    /// E(ω): log-log line plot for temporal frequency spectrum (no reference slopes).
+    fn paint_temporal(&self, ui: &mut egui::Ui) {
+        let bg_rect = ui.available_rect_before_wrap();
+        super::globe::paint_viewport_background(ui.painter(), bg_rect);
+
+        let Some(data) = &self.temporal_data else {
+            ui.centered_and_justified(|ui| {
+                ui.label(crate::i18n::t("click_for_spectrum"));
+            });
+            return;
+        };
+
+        let y_envelope = &self.y_envelope_omega;
+
+        // Collect plottable points: skip k=0 (DC), skip E<=0
+        let e_max = data.energy.iter().copied().fold(0.0_f64, f64::max);
+        let noise_floor = e_max * 1e-20;
+        let points: Vec<(f64, f64)> = data
+            .energy
+            .iter()
+            .enumerate()
+            .filter(|&(k, &e)| k >= 1 && e > noise_floor)
+            .map(|(k, &e)| (k as f64, e))
+            .collect();
+
+        if points.is_empty() {
+            ui.centered_and_justified(|ui| {
+                ui.label("No positive spectral data to plot");
+            });
+            return;
+        }
+
+        let margin_left = 60.0;
+        let margin_bottom = 40.0;
+        let margin_top = 15.0;
+        let margin_right = 15.0;
+
+        let available = ui.available_rect_before_wrap();
+        let plot_rect = egui::Rect::from_min_max(
+            egui::pos2(
+                available.min.x + margin_left,
+                available.min.y + margin_top,
+            ),
+            egui::pos2(
+                available.max.x - margin_right,
+                available.max.y - margin_bottom,
+            ),
+        );
+
+        if plot_rect.width() < 20.0 || plot_rect.height() < 20.0 {
+            return;
+        }
+
+        // X range: log10 of frequency index
+        let log_k_min = (points.first().unwrap().0).log10();
+        let log_k_max = (points.last().unwrap().0).log10();
+        let x_range = (log_k_max - log_k_min).max(0.5);
+        let x_lo = log_k_min - 0.05 * x_range;
+        let x_hi = log_k_max + 0.05 * x_range;
+
+        // Y range: sticky envelope
+        let (raw_y_lo, raw_y_hi) = y_envelope.unwrap_or_else(|| {
+            let lo = points.iter().map(|&(_, e)| e.log10()).fold(f64::INFINITY, f64::min);
+            let hi = points.iter().map(|&(_, e)| e.log10()).fold(f64::NEG_INFINITY, f64::max);
+            (lo, hi)
+        });
+        let y_lo = raw_y_lo.floor() - 0.5;
+        let y_hi = raw_y_hi.ceil() + 0.5;
+
+        let to_screen = |log_k: f64, log_e: f64| -> egui::Pos2 {
+            let fx = ((log_k - x_lo) / (x_hi - x_lo)) as f32;
+            let fy = 1.0 - ((log_e - y_lo) / (y_hi - y_lo)) as f32;
+            egui::pos2(
+                plot_rect.min.x + fx * plot_rect.width(),
+                plot_rect.min.y + fy * plot_rect.height(),
+            )
+        };
+
+        let painter = ui.painter();
+        let grid_color = egui::Color32::from_gray(60);
+        let primary = egui::Color32::from_rgb(220, 160, 60); // warm amber for temporal
+        let label_color = egui::Color32::GRAY;
+        let font = egui::FontId::proportional(11.0);
+
+        // --- X-axis grid ---
+        let ix_lo = log_k_min.floor() as i32;
+        let ix_hi = log_k_max.ceil() as i32;
+        for p in ix_lo..=ix_hi {
+            let log_k = p as f64;
+            if log_k < x_lo || log_k > x_hi {
+                continue;
+            }
+            let top = to_screen(log_k, y_hi);
+            let bot = to_screen(log_k, y_lo);
+            painter.line_segment([top, bot], egui::Stroke::new(0.5, grid_color));
+        }
+
+        // Tick labels
+        let min_label_spacing = 28.0_f32;
+        let mut last_label_x = f32::NEG_INFINITY;
+        for &(k, _) in &points {
+            let idx = k as usize;
+            let pos = to_screen(k.log10(), y_lo);
+            let sx = pos.x;
+            if sx - last_label_x < min_label_spacing {
+                continue;
+            }
+            painter.line_segment(
+                [
+                    egui::pos2(sx, plot_rect.max.y),
+                    egui::pos2(sx, plot_rect.max.y + 3.0),
+                ],
+                egui::Stroke::new(1.0, label_color),
+            );
+            // Show physical frequency if dt is meaningful
+            let label_text = if data.dt > 0.0 && data.dt != 1.0 {
+                let freq = idx as f64 / (data.energy.len() as f64 * data.dt);
+                if freq < 0.01 {
+                    format!("{:.1e}", freq)
+                } else {
+                    format!("{:.3}", freq)
+                }
+            } else {
+                format!("{idx}")
+            };
+            painter.text(
+                egui::pos2(sx, plot_rect.max.y + 4.0),
+                egui::Align2::CENTER_TOP,
+                label_text,
+                font.clone(),
+                primary,
+            );
+            last_label_x = sx;
+        }
+
+        // --- Y-axis grid ---
+        let iy_lo = y_lo.ceil() as i32;
+        let iy_hi = y_hi.floor() as i32;
+        for p in iy_lo..=iy_hi {
+            let log_e = p as f64;
+            let left = to_screen(x_lo, log_e);
+            let right = to_screen(x_hi, log_e);
+            painter.line_segment([left, right], egui::Stroke::new(0.5, grid_color));
+            painter.text(
+                egui::pos2(plot_rect.min.x - 4.0, left.y),
+                egui::Align2::RIGHT_CENTER,
+                format!("1e{p}"),
+                font.clone(),
+                label_color,
+            );
+        }
+
+        // --- Data line (no reference slopes for temporal) ---
+        let screen_points: Vec<egui::Pos2> = points
+            .iter()
+            .map(|&(k, e)| to_screen(k.log10(), e.log10()))
+            .collect();
+
+        for pair in screen_points.windows(2) {
+            painter.line_segment([pair[0], pair[1]], egui::Stroke::new(1.5, primary));
+        }
+
+        for &pt in &screen_points {
+            painter.circle_filled(pt, 2.5, primary);
+        }
+
+        // --- Axis labels ---
+        let x_label = if data.dt > 0.0 && data.dt != 1.0 { "ω" } else { "k" };
+        Self::draw_axis_labels(painter, &available, &plot_rect, x_label, "E(ω)", label_color);
 
         // Border
         painter.rect_stroke(
